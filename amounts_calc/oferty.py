@@ -3,11 +3,12 @@
 Funkcje budujące dane dla klasyfikacja.py na podstawie kanonicznych pozycji (słowniki z adaptera) i
 wyniku oblicz(). Nie rzucają z powodu danych: pozycję, której nie da się ocenić, pomijają.
 """
-from decimal import DecimalException
+from decimal import Decimal, DecimalException, localcontext
 
 from . import marza
-from .bledy import BladWalidacji
+from .bledy import ZESTAW_Z_NARZUTEM, BladWalidacji
 from .config import DOMYSLNA, KONTEKST
+from .hierarchia import liscie_pod
 from .klasyfikacja import PROG
 from .obliczenia import oblicz
 from .stawki import do_decimal
@@ -86,3 +87,78 @@ def rekordy_narzutu(pozycje, wiersze, obliczony, rabat_dok=0, dopusc_ujemne=Fals
             r["narzut_wynikowy"] = _narzut_wynikowy(p, zakup, rabat, rabat_dok, zapisane, konf)
         rekordy.append(r)
     return rekordy
+
+
+# ---- zestawy (pozycje nadrzędne) z własnym narzutem lub rabatem ----
+
+POLA_KWOT = ("netto", "vat", "brutto")
+
+
+def czynnik_zestawu(p):
+    """Mnożnik z własnego narzutu/marży i rabatu zestawu: (1 + narzut/100) albo 1/(1 - marża/100), razy
+    (1 - rabat/100). None, gdy zestaw nie ma żadnego z nich (albo dane są niepoprawne)."""
+    n, m, r = p.get("narzut_proc"), p.get("marza_proc"), p.get("rabat_proc")
+    if n is None and m is None and r is None:
+        return None
+    if n is not None and m is not None:
+        return None
+    try:
+        with localcontext(KONTEKST):
+            czynnik = Decimal(1)
+            if n is not None:
+                czynnik *= 1 + do_decimal(n, "narzut_proc") / 100
+            if m is not None:
+                czynnik /= 1 - do_decimal(m, "marza_proc") / 100
+            if r is not None:
+                czynnik *= 1 - do_decimal(r, "rabat_proc") / 100
+            return czynnik
+    except (BladWalidacji, DecimalException, ZeroDivisionError):
+        return None
+
+
+def zestawy_z_narzutem(pozycje, zapisany, dzieci, konf=DOMYSLNA):
+    """Zestawy, których zapisane kwoty różnią się od sumy liści pod nimi dokładnie o własny narzut/rabat.
+
+    pozycje: kanoniczne pozycje; zapisany: DokumentWynik z zapisanymi kwotami (zestawy mają kwoty);
+    dzieci: wynik zbuduj_hierarchie. Zwraca listę {indeks, id, narzut_proc, marza_proc, rabat_proc, czynnik,
+    suma_dzieci, zapisane, oczekiwane, roznica} (kwoty netto) tylko dla zestawów z różnicą, którą narzut/rabat
+    tłumaczy: netto w granicach 0,01, a VAT i brutto w granicach 0,01 na każdy liść (zaokrąglenia dzieci)."""
+    wynik = []
+    for i in sorted(dzieci):
+        p = pozycje[i]
+        czynnik = czynnik_zestawu(p)
+        if czynnik is None:
+            continue
+        liscie = [zapisany.pozycje[j] for j in liscie_pod(i, dzieci)]
+        wiersz = zapisany.pozycje[i]
+        suma = {k: sum((getattr(l, k) for l in liscie), Decimal(0)) for k in POLA_KWOT}
+        zapis = {k: getattr(wiersz, k) for k in POLA_KWOT}
+        if all(zapis[k] == suma[k] for k in POLA_KWOT):
+            continue          # brak różnicy do wytłumaczenia
+        oczek = {k: konf.kwota(suma[k] * czynnik) for k in POLA_KWOT}
+        tol = {"netto": PROG, "vat": PROG * (len(liscie) + 1), "brutto": PROG * (len(liscie) + 1)}
+        if all(abs(zapis[k] - oczek[k]) <= tol[k] for k in POLA_KWOT):
+            wynik.append({"indeks": i, "id": p.get("id"), "narzut_proc": p.get("narzut_proc"),
+                          "marza_proc": p.get("marza_proc"), "rabat_proc": p.get("rabat_proc"),
+                          "czynnik": czynnik.quantize(Decimal("0.000001")), "suma_dzieci": suma["netto"],
+                          "zapisane": zapis["netto"], "oczekiwane": oczek["netto"],
+                          "roznica": zapis["netto"] - suma["netto"], "_delta": {k: zapis[k] - suma[k] for k in POLA_KWOT}})
+    return wynik
+
+
+def delta_zestawow_najwyzszego_poziomu(zestawy, pozycje):
+    """Suma różnic (zapisane - suma liści) wyjaśnionych zestawów najwyższego poziomu (bez rodzica)."""
+    delta = {k: Decimal(0) for k in POLA_KWOT}
+    for z in zestawy:
+        if pozycje[z["indeks"]].get("parent_id") is None:
+            for k in POLA_KWOT:
+                delta[k] += z["_delta"][k]
+    return delta
+
+
+def przyczyna_zestaw_z_narzutem(zestawy, naglowek_uwzglednia):
+    """Przyczyna informacyjna: różnica zestawu względem sumy dzieci wynika z jego własnego narzutu/rabatu."""
+    return {"kod": ZESTAW_Z_NARZUTEM, "pole": "netto", "roznica": None, "informacja": True, "liczba": len(zestawy),
+            "opis": "kwoty pozycji nadrzędnej różnią się od sumy dzieci zgodnie z jej własnym narzutem/rabatem",
+            "naglowek_uwzglednia_zestawy": naglowek_uwzglednia,
+            "zestawy": [{k: v for k, v in z.items() if not k.startswith("_")} for z in zestawy]}

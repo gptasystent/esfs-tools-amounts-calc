@@ -26,13 +26,15 @@ from decimal import Decimal, DecimalException
 from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
 from .bledy import (BRAK_CENY, BRAK_POLA, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, ILOSC_X_CENA_NARZUT, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
                     NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ, VAT_WYLICZONY_ZGODNY,
-                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
+                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, ZESTAW_ROZNY_OD_DZIECI,
+                    BladWalidacji)
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
 from .hierarchia import zbuduj_hierarchie
 from .formatowanie import miejsca_znaczace
-from .oferty import ma_narzut, rekordy_narzutu
-from .klasyfikacja import (przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
+from .oferty import (delta_zestawow_najwyzszego_poziomu, ma_narzut, przyczyna_zestaw_z_narzutem, rekordy_narzutu,
+                     zestawy_z_narzutem)
+from .klasyfikacja import (PROG, przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
                            przyczyny_ilosc_x_cena_narzut, przyczyny_naglowka)
 from .model import dokument_z_slownika
 from .obliczenia import oblicz
@@ -193,9 +195,10 @@ def _scal_polgrosze(przyczyny):
 
 
 def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice,
-               wyliczony=None, pozycje=(), rabat_dok=0, dopusc_ujemne=False):
-    """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM."""
-    przyczyny = []
+               wyliczony=None, pozycje=(), rabat_dok=0, dopusc_ujemne=False, wstepne=()):
+    """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM.
+    `wstepne`: przyczyny ustalone wcześniej (np. ZESTAW_Z_NARZUTEM)."""
+    przyczyny = list(wstepne)
     if rodzaj == "brak_vat" and wyliczony is None:
         przyczyny.append({"kod": BRAK_VAT_W_POZYCJACH, "pole": "vat", "roznica": None,
                           "opis": "pozycje nie mają pola VAT ani (wszystkie) stawki - sprawdzono tylko netto "
@@ -237,6 +240,23 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
             przyczyny.append({"kod": NIEZGODNY_Z_BIBLIOTEKA, "pole": najw["pole"], "roznica": najw["roznica"],
                               "opis": "żaden tryb VAT nie odtwarza zapisanych sum"})
     return przyczyny
+
+
+def _uwzglednij_zestawy_w_naglowku(kan, zapisany, zestawy, pozycje):
+    """Jeśli nagłówek = suma liści + różnice wyjaśnionych zestawów (narzut/rabat zestawu wchodzi do sum
+    dokumentu), zwraca dokument z nagłówkiem pomniejszonym o te różnice - wtedy sumy liczone z liści
+    zgadzają się z nagłówkiem. Inaczej zwraca dokument bez zmian. Drugi wynik: czy nagłówek je uwzględnia."""
+    delta = delta_zestawow_najwyzszego_poziomu(zestawy, pozycje)
+    if all(d == 0 for d in delta.values()):
+        return zapisany, False
+    liscie = [p for p in zapisany.pozycje if not p.zestaw]
+    naglowek = {"netto": zapisany.suma_netto, "vat": zapisany.suma_vat, "brutto": zapisany.suma_brutto}
+    suma = {k: sum((getattr(p, k) for p in liscie), Decimal(0)) for k in naglowek}
+    if not all(abs(naglowek[k] - (suma[k] + delta[k])) <= PROG for k in naglowek):
+        return zapisany, False
+    return dokument_z_slownika(dict(kan, suma_netto=naglowek["netto"] - delta["netto"],
+                                    suma_vat=naglowek["vat"] - delta["vat"],
+                                    suma_brutto=naglowek["brutto"] - delta["brutto"])), True
 
 
 def _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne=False):
@@ -282,7 +302,18 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         wynik["dane"] = rodzaj
         wynik["pominieto_pozycje"] = rodzaj != "pelne"
         zapisany = dokument_z_slownika(dict(kan, pozycje=pozycje if rodzaj == "pelne" else []))
+        przyczyny_zestawow = []
+        if rodzaj == "pelne" and dzieci:
+            # zestaw z własnym narzutem/rabatem może różnić się od sumy dzieci - to informacja, nie błąd
+            wyjasnione = zestawy_z_narzutem(pozycje, zapisany, dzieci)
+            if wyjasnione:
+                zapisany, naglowek_uwzglednia = _uwzglednij_zestawy_w_naglowku(kan, zapisany, wyjasnione, pozycje)
+                przyczyny_zestawow.append(przyczyna_zestaw_z_narzutem(wyjasnione, naglowek_uwzglednia))
         niespojnosci = sprawdz_spojnosc(zapisany, tryb_vat=tryb_vat)
+        if przyczyny_zestawow:
+            objete = {z["indeks"] for z in przyczyny_zestawow[0]["zestawy"]}
+            niespojnosci = [n for n in niespojnosci if not (
+                n["kod"] == ZESTAW_ROZNY_OD_DZIECI and int(n["zakres"].split(":")[1]) in objete)]
         if rodzaj != "pelne":   # bez kwot (i VAT) pozycji zostaje sprawdzenie sum dokumentu
             niespojnosci = [n for n in niespojnosci
                             if n["kod"] == NETTO_PLUS_VAT_ROZNE_OD_BRUTTO and n["zakres"] == "dokument"]
@@ -319,7 +350,7 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
             wiersze, sumy, zrodlo = _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony)
         wynik["przyczyny"] = _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony,
                                         wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony, pozycje,
-                                        kan.get("rabat_dokumentu_proc", 0), dopusc_ujemne)
+                                        kan.get("rabat_dokumentu_proc", 0), dopusc_ujemne, przyczyny_zestawow)
     except (BladWalidacji, DecimalException) as e:
         wynik["blad"] = _blad_z_wyjatku(e, etap)
 
