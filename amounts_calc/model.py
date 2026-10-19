@@ -8,6 +8,31 @@ from .bledy import BRAK_POLA, NIEPOPRAWNA_STRUKTURA, BladWalidacji
 from .config import TRYB_NETTO, TRYBY
 from .hierarchia import liscie_pod, zbuduj_hierarchie
 from .stawki import KOLEJNOSC_STAWEK, do_decimal, normalizuj_stawke
+from .zestawy import (podsumowanie_stawek, rozwin, sumy_pozycji, wiersze_z_pozycji, wybierz_alternatywy)
+
+_NIE = frozenset({"nie", "false", "n", "no", "0", "f", "off"})
+
+
+def _jawnie_nie(x):
+    if x is False:
+        return True
+    if isinstance(x, str):
+        return x.strip().lower() in _NIE
+    return not isinstance(x, bool) and x == 0
+
+
+def grupa_alternatywy(alternatywa=None, grupa_opcji=None):
+    """Grupa opcji wzajemnie wykluczających się albo None (zwykła pozycja).
+
+    `grupa_opcji` (dowolna wartość) wskazuje grupę; samo `alternatywa` (True / "tak") to domyślna grupa "".
+    Jawne `alternatywa=False` ("nie", 0) wyłącza alternatywę nawet przy podanej grupie. Puste wartości
+    ("" i None) znaczą "nie podano"."""
+    brak = alternatywa is None or (isinstance(alternatywa, str) and not alternatywa.strip())
+    if not brak and _jawnie_nie(alternatywa):
+        return None
+    if grupa_opcji is not None and not (isinstance(grupa_opcji, str) and not grupa_opcji.strip()):
+        return grupa_opcji
+    return None if brak else ""
 
 
 @dataclass(frozen=True)
@@ -29,6 +54,8 @@ class Pozycja:
     cena_zakupu_jedn: object = None  # oferty/zamówienia: cena zakupu; z narzutem lub marżą daje cenę sprzedaży
     narzut_proc: object = None       # narzut % na cenie zakupu: sprzedaż = zakup * (1 + narzut/100)
     marza_proc: object = None        # alternatywnie marża %: sprzedaż = zakup / (1 - marża/100)
+    alternatywa: object = None       # opcja wykluczająca się z innymi opcjami grupy (patrz zestawy.py)
+    grupa_opcji: object = None       # nazwa grupy opcji (domyślnie jedna grupa dla wszystkich alternatyw)
 
 
 def pozycja_z_slownika(d):
@@ -42,6 +69,7 @@ def pozycja_z_slownika(d):
         stawka_vat=d["stawka_vat"], cena_brutto_jedn=d.get("cena_brutto_jedn"),
         koszt_zakupu_jedn=d.get("koszt_zakupu_jedn"), id=d.get("id"), parent_id=d.get("parent_id"),
         cena_zakupu_jedn=d.get("cena_zakupu_jedn"), narzut_proc=d.get("narzut_proc"), marza_proc=d.get("marza_proc"),
+        alternatywa=d.get("alternatywa"), grupa_opcji=d.get("grupa_opcji"),
     )
 
 
@@ -57,7 +85,8 @@ class PozycjaWynik:
     brutto: Decimal
     id: object = None
     parent_id: object = None
-    zestaw: bool = False  # wiersz zbiorczy pozycji nadrzędnej: suma dzieci, nie wchodzi do sum dokumentu
+    zestaw: bool = False  # wiersz zbiorczy pozycji nadrzędnej: N x suma dzieci, nie wchodzi do sum razem z dziećmi
+    alternatywa: object = None  # grupa opcji (wiersz najwyższego poziomu wzajemnie wykluczający się z resztą grupy)
 
 
 @dataclass(frozen=True)
@@ -81,6 +110,11 @@ class DokumentWynik:
     # Różnica: suma VAT liczona niezależnie per pozycja minus suma VAT liczona per stawka na sumie.
     # Pokazuje, ile groszy "kosztuje" wybór trybu VAT; niezależna od wybranego trybu.
     rozbieznosc_vat: Decimal = Decimal(0)
+    # Model zestawów: True - ilość zestawu mnoży sumę jego dzieci (dzieci opisują 1 szt.); False - ilość
+    # zestawu jest ignorowana (dawne zachowanie). Wybrane opcje: indeksy alternatyw, które weszły do sum.
+    ilosc_zestawu: bool = False
+    wlaczone_alternatywy: Tuple[int, ...] = ()
+    alternatywy: str = ""  # "", "brak" | "zgodne" | "najblizsze" - jak opcje dopasowano do nagłówka
 
     def stawka(self, etykieta) -> Optional[PodsumowanieStawki]:
         for p in self.podsumowanie:
@@ -94,17 +128,20 @@ class DokumentWynik:
             "waluta": self.waluta, "tryb": self.tryb, "tryb_vat": self.tryb_vat,
             "pozycje": [dict({"stawka_vat": p.stawka_vat, "ilosc": str(p.ilosc), "netto": str(p.netto),
                               "vat": str(p.vat), "brutto": str(p.brutto)},
-                             **{k: v for k, v in (("id", p.id), ("parent_id", p.parent_id)) if v is not None})
+                             **{k: v for k, v in (("id", p.id), ("parent_id", p.parent_id),
+                                                   ("alternatywa", p.alternatywa)) if v is not None})
                         for p in self.pozycje],
             "podsumowanie": [{"stawka_vat": s.stawka_vat, "netto": str(s.netto), "vat": str(s.vat),
                               "brutto": str(s.brutto)} for s in self.podsumowanie],
             "suma_netto": str(self.suma_netto), "suma_vat": str(self.suma_vat),
             "suma_brutto": str(self.suma_brutto), "rozbieznosc_vat": str(self.rozbieznosc_vat),
+            "ilosc_zestawu": self.ilosc_zestawu,
         }
 
 
 def podsumuj_stawki(pozycje):
-    """Grupuje pozycje (z polami stawka_vat/netto/vat/brutto) po stawce, w stałej kolejności."""
+    """Grupuje pozycje (z polami stawka_vat/netto/vat/brutto) po stawce, w stałej kolejności.
+    Prosta suma liści (bez ilości zestawów i alternatyw) - dla dokumentów bez takich pozycji."""
     sumy = {}
     for p in pozycje:
         if p.zestaw:
@@ -114,6 +151,17 @@ def podsumuj_stawki(pozycje):
     return tuple(PodsumowanieStawki(s, *sumy[s]) for s in KOLEJNOSC_STAWEK if s in sumy)
 
 
+def podsumowanie_dokumentu(pozycje, ilosc_zestawu=False, wlaczone=(), konf=None):
+    """Podsumowanie stawek dokumentu: zestawy o ilości N wnoszą N x dzieci, opcje spoza `wlaczone` nie wchodzą
+    do sum, dzieci nie są liczone drugi raz. Dla zwykłych dokumentów równoważne podsumuj_stawki."""
+    kwargs = {} if konf is None else {"konf": konf}
+    wiersze = wiersze_z_pozycji(pozycje)
+    dzieci = zbuduj_hierarchie([(p.id, p.parent_id) for p in pozycje])
+    rozw = rozwin(wiersze, dzieci, ilosc_zestawu, **kwargs)
+    sumy = podsumowanie_stawek(wiersze, dzieci, rozw, frozenset(wlaczone), **kwargs)
+    return tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"]) for s, v in sumy.items())
+
+
 def dokument_z_dokumentem(dok):
     """Akceptuje DokumentWynik albo słownik (np. zbudowany z wiersza bazy) i zwraca DokumentWynik."""
     if isinstance(dok, DokumentWynik):
@@ -121,16 +169,22 @@ def dokument_z_dokumentem(dok):
     return dokument_z_slownika(dok)
 
 
-def dokument_z_slownika(d):
+def dokument_z_slownika(d, ilosc_zestawu=None):
     """Buduje DokumentWynik z zewnętrznych danych bez przeliczania - do sprawdz_spojnosc/porownaj.
 
     Wymagane: pozycje[{stawka_vat, netto, vat, brutto}], suma_netto, suma_vat, suma_brutto.
     Opcjonalne: waluta, tryb ('netto'), tryb_vat, podsumowanie[{stawka_vat, netto, vat, brutto}],
-    w pozycjach id i parent_id (zestawy; kwoty pozycji nadrzędnej mogą być pominięte).
+    w pozycjach id i parent_id (zestawy; kwoty pozycji nadrzędnej mogą być pominięte - zostaną uzupełnione
+    wartością oczekiwaną), `alternatywa` / `grupa_opcji` (opcje wzajemnie wykluczające się, patrz zestawy.py).
+
+    `ilosc_zestawu` (albo klucz "ilosc_zestawu" w słowniku; domyślnie False): True - ilość pozycji nadrzędnej
+    mnoży sumę jej dzieci (dzieci opisują 1 szt. zestawu); False - ilość zestawu jest ignorowana.
     """
     for pole in ("pozycje", "suma_netto", "suma_vat", "suma_brutto"):
         if pole not in d:
             raise BladWalidacji(BRAK_POLA, pole, "brak pola w dokumencie")
+    if ilosc_zestawu is None:
+        ilosc_zestawu = bool(d.get("ilosc_zestawu", False))
     surowe = list(d["pozycje"])
     for i, p in enumerate(surowe):
         if not isinstance(p, Mapping):
@@ -139,11 +193,13 @@ def dokument_z_slownika(d):
     pozycje = [None] * len(surowe)
 
     def pozycja(i, p, netto, vat, brutto, zestaw):
+        alt = grupa_alternatywy(p.get("alternatywa"), p.get("grupa_opcji")) if p.get("parent_id") is None else None
         return PozycjaWynik(
             indeks=i, ilosc=do_decimal(p.get("ilosc", 1), "pozycje[%d].ilosc" % i),
             cena_po_rabacie=Decimal(0), rabat_proc=Decimal(0),
             stawka_vat=normalizuj_stawke(p["stawka_vat"], "pozycje[%d].stawka_vat" % i),
-            netto=netto, vat=vat, brutto=brutto, id=p.get("id"), parent_id=p.get("parent_id"), zestaw=zestaw)
+            netto=netto, vat=vat, brutto=brutto, id=p.get("id"), parent_id=p.get("parent_id"), zestaw=zestaw,
+            alternatywa=alt)
 
     for i, p in enumerate(surowe):
         if i in dzieci:
@@ -153,15 +209,29 @@ def dokument_z_slownika(d):
                 raise BladWalidacji(BRAK_POLA, "pozycje[%d].%s" % (i, pole), "brak pola")
         pozycje[i] = pozycja(i, p, *(do_decimal(p[k], "pozycje[%d].%s" % (i, k)) for k in ("netto", "vat", "brutto")),
                              False)
-    for i in sorted(dzieci):   # pozycje nadrzędne: brakujące kwoty = suma liści pod nimi
+    # pozycje nadrzędne: ilość i stawka z danych, kwoty zapisane albo (gdy brak) oczekiwane = N x suma dzieci
+    szkic = []
+    for i, p in enumerate(surowe):
+        if i in dzieci:
+            if "stawka_vat" not in p:
+                raise BladWalidacji(BRAK_POLA, "pozycje[%d].stawka_vat" % i, "brak pola")
+            szkic.append({"indeks": i, "id": p.get("id"), "ilosc": do_decimal(p.get("ilosc", 1), "pozycje[%d].ilosc" % i),
+                          "netto": None, "vat": None, "brutto": None, "stawka": None, "zestaw": True,
+                          "alternatywa": None})
+        else:
+            szkic.append(wiersze_z_pozycji([pozycje[i]])[0])
+    oczekiwane = rozwin(szkic, dzieci, ilosc_zestawu)["oczekiwane"]
+    for i in sorted(dzieci):
         p = surowe[i]
-        if "stawka_vat" not in p:
-            raise BladWalidacji(BRAK_POLA, "pozycje[%d].stawka_vat" % i, "brak pola")
-        liscie = [pozycje[j] for j in liscie_pod(i, dzieci)]
-        kwoty = [do_decimal(p[k], "pozycje[%d].%s" % (i, k)) if p.get(k) is not None
-                 else sum((getattr(l, k) for l in liscie), Decimal(0)) for k in ("netto", "vat", "brutto")]
+        kwoty = [do_decimal(p[k], "pozycje[%d].%s" % (i, k)) if p.get(k) is not None else oczekiwane[i][k]
+                 for k in ("netto", "vat", "brutto")]
         pozycje[i] = pozycja(i, p, *kwoty, True)
     pozycje = tuple(pozycje)
+    naglowek = {"netto": do_decimal(d["suma_netto"], "suma_netto"), "vat": do_decimal(d["suma_vat"], "suma_vat"),
+                "brutto": do_decimal(d["suma_brutto"], "suma_brutto")}
+    wiersze = wiersze_z_pozycji(pozycje)
+    rozw = rozwin(wiersze, dzieci, ilosc_zestawu)
+    wlaczone, alternatywy = wybierz_alternatywy(wiersze, dzieci, rozw, naglowek)
     if d.get("podsumowanie") is not None:
         podsumowanie = tuple(
             PodsumowanieStawki(normalizuj_stawke(s["stawka_vat"], "podsumowanie.stawka_vat"),
@@ -170,13 +240,13 @@ def dokument_z_slownika(d):
                                do_decimal(s["brutto"], "podsumowanie.brutto"))
             for s in d["podsumowanie"])
     else:
-        podsumowanie = podsumuj_stawki(pozycje)
+        sumy = podsumowanie_stawek(wiersze, dzieci, rozw, wlaczone)
+        podsumowanie = tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"]) for s, v in sumy.items())
     tryb = d.get("tryb", TRYB_NETTO)
     if tryb not in TRYBY:
         raise BladWalidacji("NIEPOPRAWNY_TRYB", "tryb", "dozwolone: %s" % (TRYBY,))
     return DokumentWynik(
         waluta=d.get("waluta", "PLN"), tryb=tryb, tryb_vat=d.get("tryb_vat", ""),
         pozycje=pozycje, podsumowanie=podsumowanie,
-        suma_netto=do_decimal(d["suma_netto"], "suma_netto"),
-        suma_vat=do_decimal(d["suma_vat"], "suma_vat"),
-        suma_brutto=do_decimal(d["suma_brutto"], "suma_brutto"))
+        suma_netto=naglowek["netto"], suma_vat=naglowek["vat"], suma_brutto=naglowek["brutto"],
+        ilosc_zestawu=bool(ilosc_zestawu), wlaczone_alternatywy=tuple(sorted(wlaczone)), alternatywy=alternatywy)

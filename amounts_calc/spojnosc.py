@@ -9,8 +9,9 @@ from .bledy import (NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, PODSUMOWANIE_STAWKI_ROZNE_OD
                     SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU,
                     VAT_STAWKI_ROZNY_OD_SUMY, ZESTAW_ROZNY_OD_DZIECI)
 from .config import DOMYSLNA, KONTEKST, TRYB_BRUTTO, VAT_PER_STAWKA
-from .hierarchia import liscie_pod, zbuduj_hierarchie
-from .model import dokument_z_dokumentem, podsumuj_stawki
+from .hierarchia import zbuduj_hierarchie
+from .model import DokumentWynik, PodsumowanieStawki, dokument_z_dokumentem, dokument_z_slownika
+from .zestawy import (pasuje_do_jednej_sztuki, podsumowanie_stawek, rozwin, sumy_pozycji, wiersze_z_pozycji)
 from .stawki import wartosc_stawki
 
 _100 = Decimal(100)
@@ -30,23 +31,32 @@ def _vat_z_sumy(sumy, tryb, konf):
     return konf.kwota(sumy.netto * r / _100)
 
 
-def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA):
+def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zestawu=None):
     """Zwraca listę niespójności (pusta = dokument spójny). Każdy wpis to słownik:
     kod, zakres, pole, oczekiwano, jest, roznica (jest - oczekiwano), opis.
+
+    `ilosc_zestawu` (tylko dla słownika; dla DokumentWynik liczy się jego pole `ilosc_zestawu`): True - ilość
+    pozycji nadrzędnej mnoży sumę jej dzieci (dzieci opisują 1 szt. zestawu), False/None - ilość zestawu
+    jest ignorowana (dawne zachowanie, chyba że słownik ma klucz "ilosc_zestawu").
 
     Sprawdzane:
       SUMA_POZYCJI_ROZNA_OD_DOKUMENTU       suma pozycji != suma dokumentu
       NETTO_PLUS_VAT_ROZNE_OD_BRUTTO        netto + vat != brutto (pozycja, stawka, dokument)
       PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI  wiersz podsumowania stawki != suma jej pozycji
       SUMA_STAWEK_ROZNA_OD_DOKUMENTU        suma wierszy podsumowania != suma dokumentu
-      ZESTAW_ROZNY_OD_DZIECI                kwoty pozycji nadrzędnej != suma jej dzieci
-                                            (pozycje nadrzędne nie wchodzą do sum dokumentu)
+      ZESTAW_ROZNY_OD_DZIECI                kwoty pozycji nadrzędnej != N x suma jej dzieci, gdzie N to ilość
+                                            zestawu (dzieci opisują 1 szt.; dla N = 1 po prostu suma dzieci).
+                                            W opisie: czy zapisana kwota pasuje do 1 x dzieci (ilość pominięta)
+                                            Zestaw wnosi do sum dokumentu N x dzieci, a dzieci nie są liczone
+                                            drugi raz. Alternatywy: do sumy wchodzi co najwyżej jedna z grupy
       VAT_STAWKI_ROZNY_OD_SUMY              VAT stawki != VAT policzony z sumy stawki
                                             (tylko dla tryb_vat == per_stawka; domyślnie
                                             bierze tryb_vat dokumentu, a gdy nieznany - pomija)
     """
-    dok = dokument_z_dokumentem(dokument)
+    # model zestawów: dla słownika decyduje `ilosc_zestawu` (albo klucz "ilosc_zestawu"), dla DokumentWynik - jego pole
+    dok = dokument if isinstance(dokument, DokumentWynik) else dokument_z_slownika(dokument, ilosc_zestawu)
     konf = konfiguracja
+    uwzglednij_ilosc = dok.ilosc_zestawu
     tryb_vat = tryb_vat if tryb_vat is not None else dok.tryb_vat
     wyniki = []
 
@@ -65,25 +75,36 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA):
                                 dok.suma_netto + dok.suma_vat, dok.suma_brutto,
                                 "suma_netto + suma_vat != suma_brutto"))
 
-        # suma pozycji == suma dokumentu
-        z_pozycji = podsumuj_stawki(dok.pozycje)
+        # suma pozycji == suma dokumentu (zestaw wnosi N x dzieci, opcje spoza wyboru nie wchodzą do sumy)
+        wiersze = wiersze_z_pozycji(dok.pozycje)
+        dzieci = zbuduj_hierarchie([(p.id, p.parent_id) for p in dok.pozycje])
+        rozw = rozwin(wiersze, dzieci, uwzglednij_ilosc, konf)
+        wlaczone = frozenset(dok.wlaczone_alternatywy)
+        sumy_poz = sumy_pozycji(wiersze, dzieci, rozw, wlaczone)
+        z_pozycji = tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"])
+                          for s, v in podsumowanie_stawek(wiersze, dzieci, rozw, wlaczone, konf).items())
         for pole in _POLA_KWOT:
-            suma = sum((getattr(p, pole) for p in dok.pozycje if not p.zestaw), Decimal(0))
+            suma = sumy_poz[pole]
             jest = getattr(dok, "suma_" + pole)
             if suma != jest:
                 wyniki.append(_wpis(SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, "dokument", "suma_" + pole, suma, jest,
                                     "suma pozycji != suma dokumentu"))
 
-        # pozycja nadrzędna (zestaw) == suma dzieci
-        dzieci = zbuduj_hierarchie([(p.id, p.parent_id) for p in dok.pozycje])
+        # pozycja nadrzędna (zestaw) == N x suma dzieci
         for i in sorted(dzieci):
-            potomne = [dok.pozycje[j] for j in liscie_pod(i, dzieci)]
+            n = wiersze[i]["ilosc"] if uwzglednij_ilosc else 1
+            jedna_sztuka = n != 1 and pasuje_do_jednej_sztuki(wiersze[i], rozw["sumy_dzieci"][i])
             for pole in _POLA_KWOT:
-                oczek = sum((getattr(p, pole) for p in potomne), Decimal(0))
+                oczek = rozw["oczekiwane"][i][pole]
                 jest = getattr(dok.pozycje[i], pole)
                 if oczek != jest:
-                    wyniki.append(_wpis(ZESTAW_ROZNY_OD_DZIECI, "pozycja:%d" % i, pole, oczek, jest,
-                                        "kwota pozycji nadrzędnej != suma jej dzieci"))
+                    if n == 1:
+                        opis = "kwota pozycji nadrzędnej != suma jej dzieci"
+                    else:
+                        opis = "kwota pozycji nadrzędnej != ilość (%s) x suma jej dzieci" % n
+                        if jedna_sztuka:
+                            opis += "; pasuje do 1 x suma dzieci (ilość zestawu pominięta)"
+                    wyniki.append(_wpis(ZESTAW_ROZNY_OD_DZIECI, "pozycja:%d" % i, pole, oczek, jest, opis))
 
         # podsumowanie stawek vs pozycje i vs dokument
         wiersze = {s.stawka_vat: s for s in dok.podsumowanie}
