@@ -168,6 +168,18 @@ def przyczyna_zestaw_z_narzutem(zestawy, naglowek_uwzglednia):
 
 # ---- alternatywy (opcje wzajemnie wykluczające się) ----
 
+def _blizej_wszystkich(naglowek, wszystkie, wlaczone, wiersze, dzieci, rozw, pola):
+    """Nagłówek różni się od baza + WSZYSTKIE opcje (np. o błąd narzutu), ale jest tą sumą wyraźnie bliżej niż
+    wybraną kombinacją: odległość od sumy ze wszystkimi < od sumy z wybraną i nie więcej niż 25% dodanych kwot.
+    Porównanie po kwotach zapisanych w pozycjach."""
+    wybrana = sumy_pozycji(wiersze, dzieci, rozw, frozenset(wlaczone))
+    baza = sumy_pozycji(wiersze, dzieci, rozw, frozenset())
+    d_wszystkie = sum((abs(naglowek[f] - wszystkie[f]) for f in pola), Decimal(0))
+    d_wybrana = sum((abs(naglowek[f] - wybrana[f]) for f in pola), Decimal(0))
+    dodane = sum((abs(wszystkie[f] - baza[f]) for f in pola), Decimal(0))
+    return d_wszystkie < d_wybrana and d_wszystkie <= Decimal("0.25") * dodane
+
+
 def przyczyna_alternatyw(wiersze, dzieci, naglowek, wlaczone, uwzglednij_ilosc=True, konf=DOMYSLNA):
     """Informacja ALTERNATYWY_W_SUMIE: lista opcji (pozycje najwyższego poziomu z `alternatywa`) per grupa,
     które z nich weszły do sum i czy nagłówek jest z tym zgodny.
@@ -183,7 +195,8 @@ def przyczyna_alternatyw(wiersze, dzieci, naglowek, wlaczone, uwzglednij_ilosc=T
     wszystkie = sumy_pozycji(wiersze, dzieci, rozw, frozenset(i for idx in grupy.values() for i in idx))
     pola = [f for f in POLA_KWOT if naglowek.get(f) is not None and wszystkie[f] is not None]
     zawiera_wszystkie = (dopasowanie != "zgodne" and any(len(idx) > 1 for idx in grupy.values()) and bool(pola)
-                         and all(abs(naglowek[f] - wszystkie[f]) <= PROG for f in pola))
+                         and (all(abs(naglowek[f] - wszystkie[f]) <= PROG for f in pola)
+                              or _blizej_wszystkich(naglowek, wszystkie, wlaczone, wiersze, dzieci, rozw, pola)))
     return {"kod": ALTERNATYWY_W_SUMIE, "pole": None, "roznica": None, "informacja": True, "raportuj": True,
             "opis": "pozycje typu opcja wykluczają się wzajemnie: do sumy wchodzi co najwyżej jedna z grupy",
             "dopasowanie": dopasowanie, "naglowek_zawiera_wszystkie_opcje": zawiera_wszystkie,
