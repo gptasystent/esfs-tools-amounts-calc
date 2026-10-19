@@ -14,7 +14,8 @@ from .stawki import KOLEJNOSC_STAWEK, do_decimal, normalizuj_stawke
 class Pozycja:
     """Wejściowa pozycja dokumentu.
 
-    W trybie od netto podaj `cena_netto_jedn` (albo `koszt_zakupu_jedn` + narzut/marża dokumentu),
+    W trybie od netto podaj `cena_netto_jedn` (albo `cena_zakupu_jedn` + `narzut_proc`/`marza_proc` pozycji,
+    które mają pierwszeństwo, albo `koszt_zakupu_jedn` + narzut/marża dokumentu),
     w trybie od brutto - `cena_brutto_jedn`. Liczby: Decimal/int/str, nigdy float.
     """
     ilosc: object
@@ -25,6 +26,9 @@ class Pozycja:
     koszt_zakupu_jedn: object = None
     id: object = None         # identyfikator pozycji - potrzebny tylko, gdy inne pozycje mają ją za rodzica
     parent_id: object = None  # id pozycji nadrzędnej (zestawu); patrz hierarchia.py
+    cena_zakupu_jedn: object = None  # oferty/zamówienia: cena zakupu; z narzutem lub marżą daje cenę sprzedaży
+    narzut_proc: object = None       # narzut % na cenie zakupu: sprzedaż = zakup * (1 + narzut/100)
+    marza_proc: object = None        # alternatywnie marża %: sprzedaż = zakup / (1 - marża/100)
 
 
 def pozycja_z_slownika(d):
@@ -37,6 +41,7 @@ def pozycja_z_slownika(d):
         ilosc=d["ilosc"], cena_netto_jedn=d.get("cena_netto_jedn"), rabat_proc=d.get("rabat_proc", 0),
         stawka_vat=d["stawka_vat"], cena_brutto_jedn=d.get("cena_brutto_jedn"),
         koszt_zakupu_jedn=d.get("koszt_zakupu_jedn"), id=d.get("id"), parent_id=d.get("parent_id"),
+        cena_zakupu_jedn=d.get("cena_zakupu_jedn"), narzut_proc=d.get("narzut_proc"), marza_proc=d.get("marza_proc"),
     )
 
 

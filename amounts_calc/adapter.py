@@ -34,6 +34,9 @@ MAPOWANIE_DOMYSLNE = {
     "pozycja": {
         "id": ["id", "id_pozycji", "pozycja_id"],
         "parent_id": ["parent_id", "id_nadrzednej", "nadrzedna_id"],
+        "cena_zakupu_jedn": ["cena_zakupu_jedn", "cena_zakupu", "zakup"],
+        "narzut_proc": ["narzut_proc", "narzut"],
+        "marza_proc": ["marza_proc", "marza"],
         "ilosc": ["ilosc", "qty", "liczba_sztuk"],
         "cena_netto_jedn": ["cena_netto_jedn", "cena_netto"],
         "cena_brutto_jedn": ["cena_brutto_jedn", "cena_brutto"],
