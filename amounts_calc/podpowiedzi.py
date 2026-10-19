@@ -16,7 +16,7 @@ Funkcje czyste na Decimal; nie rzucają z powodu danych.
 """
 from decimal import Decimal
 
-from .bledy import (BRUTTO_ROWNE_NETTO, ZESTAW_BEZ_MNOZENIA_PRZEZ_ILOSC, ZESTAW_NIEODSWIEZONY,
+from .bledy import (ALTERNATYWA_BEZ_WYBORU, ALTERNATYWA_WIELE_WYBRANYCH, BRUTTO_ROWNE_NETTO, OPCJA_W_SUMIE, ZESTAW_BEZ_MNOZENIA_PRZEZ_ILOSC, ZESTAW_NIEODSWIEZONY,
                     ZESTAW_ROZNY_OD_DZIECI)
 from .hierarchia import liscie_pod
 from .klasyfikacja import MAX_POZYCJI_W_OPISIE, POLA, PROG
@@ -145,6 +145,8 @@ def oznacz_podpowiedzi(niespojnosci, zapisany, wiersze, dzieci, pozycje, naglowe
     def podpowiedz(n):
         if n.get("drobiazg"):
             return "POLGROSZ"
+        if n["kod"] in (OPCJA_W_SUMIE, ALTERNATYWA_BEZ_WYBORU, ALTERNATYWA_WIELE_WYBRANYCH):
+            return INNA     # przyczyna jest w kodzie niespójności (i w przyczynach dokumentu)
         zakres, _, arg = n["zakres"].partition(":")
         if n["kod"] == ZESTAW_ROZNY_OD_DZIECI:
             i = int(arg)
