@@ -2,7 +2,7 @@
 
     python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
         [--json wynik.json] [--csv wynik.csv] [--max-przyklady N] [--pomin-typy TYP1,TYP2]
-        [--mapowanie mapowanie.json]
+        [--dopusc-ujemne | --nie-dopuszczaj-ujemnych] [--mapowanie mapowanie.json]
 
 Dla każdego dokumentu:
   a) sprawdz_spojnosc na zapisanych danych (niespójność zapisanych sum),
@@ -189,12 +189,13 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
     return przyczyny
 
 
-def _policz_oba_tryby(kan, zapisany, rodzaj):
+def _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne=False):
     z_stawkami = rodzaj == "pelne" or "podsumowanie" in kan
     obliczone, rozbieznosci, pozycyjne, pasuje = {}, {}, {}, {}
     for tv in (VAT_PER_STAWKA, VAT_PER_POZYCJA):
         obliczone[tv] = oblicz(kan["pozycje"], tryb=kan.get("tryb", "netto"), waluta=kan.get("waluta", "PLN"),
-                               rabat_dokumentu_proc=kan.get("rabat_dokumentu_proc", 0), tryb_vat=tv)
+                               rabat_dokumentu_proc=kan.get("rabat_dokumentu_proc", 0), tryb_vat=tv,
+                               dopusc_ujemne=dopusc_ujemne)
         wszystkie = porownaj(zapisany, obliczone[tv])
         istotne = _kryterium(wszystkie, z_stawkami)
         rozbieznosci[tv] = _opisz_roznice(istotne)
@@ -203,10 +204,13 @@ def _policz_oba_tryby(kan, zapisany, rodzaj):
     return obliczone, rozbieznosci, pozycyjne, pasuje
 
 
-def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
+def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=(),
+                     dopusc_ujemne=False):
     """Sprawdza jeden dokument (słownik o dowolnych nazwach pól + mapowanie). Nie rzuca z powodu danych.
 
     Dokument, którego typ jest w `pomin_typy`, nie jest sprawdzany (status "pominiety").
+    `dopusc_ujemne` dopuszcza ujemne ilości i ceny pozycji; w bibliotece domyślnie False (jak w oblicz()),
+    a CLI włącza je domyślnie, bo w zapisanych dokumentach to normalne (rabat jako linia, korekta, zwrot).
     Wynik: status (spojny / drobiazg / niepelny / niespojny / blad / pominiety), niespojnosci
     (z sprawdz_spojnosc), przyczyny (kody z klasyfikacja.py) i dopasowanie do trybów VAT.
     """
@@ -244,7 +248,7 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         etap = "obliczenia"
         obliczone = None
         try:
-            obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj)
+            obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne)
             wynik.update(pasuje=pasuje, rozbieznosci=rozbieznosci, liczba_roznic_pozycji=pozycyjne,
                          tryb_pasujacy=_dopasowanie(pasuje[VAT_PER_STAWKA], pasuje[VAT_PER_POZYCJA]))
             # do "największej rozbieżności" liczy się lepszy z trybów (mniejsza suma różnic)
@@ -283,11 +287,11 @@ def _wg_typu(wyniki):
     return dict(sorted(tabela.items(), key=lambda kv: (-kv[1]["dokumentow"], kv[0])))
 
 
-def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
+def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=(), dopusc_ujemne=False):
     """Zwraca (lista wyników per dokument, podsumowanie). Błędny dokument nie przerywa partii."""
     scal_mapowanie(mapowanie)  # wczesny błąd przy złym mapowaniu
     pomin = zbior_typow(pomin_typy)
-    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin) for i, d in enumerate(dokumenty)]
+    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin, dopusc_ujemne) for i, d in enumerate(dokumenty)]
     kody = Counter()
     for w in wyniki:
         kody.update({n["kod"] for n in w["niespojnosci"]} | {c["kod"] for c in w["przyczyny"]})
@@ -466,6 +470,10 @@ def _parser():
                    help="ile największych rozbieżności pokazać w podsumowaniu (domyślnie 10)")
     p.add_argument("--csv", dest="csv_wyjscie", metavar="WYNIK.csv",
                    help="zapisz dokumenty z problemami jako CSV (separator ';', UTF-8 z BOM - do Excela)")
+    p.add_argument("--dopusc-ujemne", dest="dopusc_ujemne", action="store_true", default=True,
+                   help="dopuszczaj ujemne ilości i ceny pozycji (domyślnie włączone)")
+    p.add_argument("--nie-dopuszczaj-ujemnych", dest="dopusc_ujemne", action="store_false",
+                   help="ujemna ilość/cena pozycji to błąd (ILOSC_UJEMNA / CENA_UJEMNA)")
     p.add_argument("--pomin-typy", dest="pomin_typy", default="", metavar="TYP1,TYP2",
                    help="typy dokumentów do pominięcia, np. KOREKTA,ROZ (wielkość liter bez znaczenia)")
     p.add_argument("--mapowanie", metavar="MAPOWANIE.json",
@@ -486,7 +494,7 @@ def main(argv=None):
         mapowanie = wczytaj_plik_json(args.mapowanie) if args.mapowanie else None
         if not isinstance(dokumenty, list):
             raise ValueError("oczekiwano listy dokumentów (tablicy JSON), jest %s" % type(dokumenty).__name__)
-        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy)
+        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy, args.dopusc_ujemne)
         if args.json_wyjscie:
             zapisz_json(args.json_wyjscie, [wynik_json(w) for w in wyniki if ma_problem(w)])
         if args.csv_wyjscie:

@@ -262,7 +262,8 @@ class TestCli(unittest.TestCase):
                       "pozycje": [poz(-1, 1, 1, 0, 1, 0)]}]
         p = self.zapisz("d.json", dokumenty)
         wynik = self.sciezka("wynik.json")
-        kod, out, _ = self.uruchom(p, "--json", wynik)
+        # ujemna ilość jest błędem tylko przy --nie-dopuszczaj-ujemnych (domyślnie CLI ją dopuszcza)
+        kod, out, _ = self.uruchom(p, "--json", wynik, "--nie-dopuszczaj-ujemnych")
         self.assertEqual(kod, 1)
         with open(wynik, encoding="utf-8") as f:
             raport = json.load(f)

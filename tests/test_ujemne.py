@@ -210,3 +210,131 @@ class TestLustrzanosc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- CLI i sprawdz_dokument ----
+import contextlib
+import io
+import json
+import os
+import tempfile
+
+from amounts_calc.check import main, sprawdz_dokument, sprawdz_partie
+
+
+def pz(ilosc, cena, netto, vat, brutto, stawka=23):
+    return {"ilosc": ilosc, "cena_netto_jedn": cena, "stawka_vat": stawka, "netto": netto, "vat": vat,
+            "brutto": brutto}
+
+
+FAKTURA_Z_RABATEM = {   # 100 zł + linia rabatowa -10 zł (23%): 90,00 + 20,70
+    "id": "FV/R", "typ": "FV", "suma_netto": "90.00", "suma_vat": "20.70", "suma_brutto": "110.70",
+    "pozycje": [pz(1, "100", "100.00", "23.00", "123.00"), pz(1, "-10", "-10.00", "-2.30", "-12.30")]}
+KOREKTA_UJEMNA = {
+    "id": "KOR/1", "typ": "KOREKTA", "suma_netto": "-100.00", "suma_vat": "-23.00", "suma_brutto": "-123.00",
+    "pozycje": [pz(-1, "100", "-100.00", "-23.00", "-123.00")]}
+SUMA_ZEROWA = {
+    "id": "Z/0", "typ": "FV", "suma_netto": "0.00", "suma_vat": "0.00", "suma_brutto": "0.00",
+    "pozycje": [pz(1, "50", "50.00", "11.50", "61.50"), pz(-1, "50", "-50.00", "-11.50", "-61.50")]}
+
+
+class TestSprawdzDokumentUjemne(unittest.TestCase):
+    def test_domyslnie_w_bibliotece_blad(self):
+        w = sprawdz_dokument(KOREKTA_UJEMNA)
+        self.assertEqual((w["status"], w["blad"]["kod"], w["blad"]["etap"]), ("blad", bledy.ILOSC_UJEMNA, "obliczenia"))
+
+    def test_z_opcja_dokumenty_ujemne_sa_spojne(self):
+        for dok in (FAKTURA_Z_RABATEM, KOREKTA_UJEMNA, SUMA_ZEROWA):
+            with self.subTest(id=dok["id"]):
+                w = sprawdz_dokument(dok, dopusc_ujemne=True)
+                self.assertEqual((w["status"], w["blad"], w["niespojnosci"], w["przyczyny"]), ("spojny", None, [], []))
+                self.assertEqual(w["tryb_pasujacy"], "oba")
+
+    def test_suma_zerowa_nie_jest_naglowkiem_zero(self):
+        w = sprawdz_dokument(SUMA_ZEROWA, dopusc_ujemne=True)
+        self.assertNotIn(bledy.NAGLOWEK_ZERO, {p["kod"] for p in w["przyczyny"]})
+
+    def test_blad_w_ujemnym_dokumencie_jest_wykrywany(self):
+        d = json.loads(json.dumps(FAKTURA_Z_RABATEM))
+        d["suma_netto"] = "100.00"      # rabat pominięty w nagłówku
+        w = sprawdz_dokument(d, dopusc_ujemne=True)
+        kody = {p["kod"] for p in w["przyczyny"]}
+        self.assertEqual(w["status"], "niespojny")
+        self.assertIn(bledy.NAGLOWEK_WYZSZY, kody)
+        p = [x for x in w["przyczyny"] if x["kod"] == bledy.NAGLOWEK_WYZSZY][0]
+        self.assertEqual(p["roznica"], D("10.00"))
+        self.assertEqual([m["indeks"] for m in p["mozliwe_pozycje"]], [1])   # linia rabatowa (moduł 10,00)
+
+    def test_ilosc_x_cena_dla_ujemnej_linii(self):
+        d = json.loads(json.dumps(KOREKTA_UJEMNA))
+        d["pozycje"][0]["ilosc"] = -2
+        w = sprawdz_dokument(d, dopusc_ujemne=True)
+        self.assertIn(bledy.ILOSC_X_CENA, {p["kod"] for p in w["przyczyny"]})
+
+    def test_polgrosz_dla_ujemnych(self):
+        d = json.loads(json.dumps(KOREKTA_UJEMNA))
+        d["suma_brutto"] = "-123.005"
+        w = sprawdz_dokument(d, dopusc_ujemne=True)
+        self.assertEqual(w["status"], "drobiazg")
+
+    def test_partia(self):
+        wyniki, p = sprawdz_partie([FAKTURA_Z_RABATEM, KOREKTA_UJEMNA, SUMA_ZEROWA], dopusc_ujemne=True)
+        self.assertEqual((p["spojne"], p["z_bledem"]), (3, 0))
+        _, p2 = sprawdz_partie([FAKTURA_Z_RABATEM, KOREKTA_UJEMNA, SUMA_ZEROWA])
+        self.assertEqual((p2["spojne"], p2["z_bledem"]), (0, 3))     # wszystkie mają ujemną linię
+
+
+class TestCliUjemne(unittest.TestCase):
+    def uruchom(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                kod = main(list(argv))
+            except SystemExit as e:
+                kod = e.code
+        return kod, out.getvalue()
+
+    def plik(self, tmp, dokumenty):
+        sciezka = os.path.join(tmp, "d.json")
+        with open(sciezka, "w", encoding="utf-8") as f:
+            json.dump(dokumenty, f)
+        return sciezka
+
+    def test_domyslnie_dopuszcza_ujemne(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.plik(tmp, [FAKTURA_Z_RABATEM, KOREKTA_UJEMNA, SUMA_ZEROWA])
+            kod, out = self.uruchom(p)
+            self.assertEqual(kod, 0, out)
+            self.assertIn("Bez uwag: 3 z 3 dokumentów", out)
+
+    def test_flaga_jawna_i_wylaczenie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.plik(tmp, [KOREKTA_UJEMNA])
+            self.assertEqual(self.uruchom(p, "--dopusc-ujemne")[0], 0)
+            kod, out = self.uruchom(p, "--nie-dopuszczaj-ujemnych")
+            self.assertEqual(kod, 1)
+            self.assertIn("ILOSC_UJEMNA", out)
+            wyj = os.path.join(tmp, "w.json")
+            self.uruchom(p, "--nie-dopuszczaj-ujemnych", "--json", wyj)
+            with open(wyj, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)[0]["blad"]["kod"], "ILOSC_UJEMNA")
+
+    def test_pomin_typy_korekta_nadal_dziala_razem_z_ujemnymi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.plik(tmp, [KOREKTA_UJEMNA, FAKTURA_Z_RABATEM])
+            kod, out = self.uruchom(p, "--pomin-typy", "KOREKTA", "--nie-dopuszczaj-ujemnych")
+            self.assertEqual(kod, 1)       # faktura z ujemną linią, a ujemne wyłączone
+            self.assertIn("Pominięte typy (KOREKTA): 1", out)
+
+    def test_csv_i_json_dla_dokumentu_ujemnego_z_bledem_danych(self):
+        d = json.loads(json.dumps(KOREKTA_UJEMNA))
+        d["suma_brutto"] = "-123.50"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.plik(tmp, [d])
+            wyj = os.path.join(tmp, "w.csv")
+            kod, out = self.uruchom(p, "--csv", wyj)
+            self.assertEqual(kod, 1)
+            with open(wyj, encoding="utf-8-sig") as f:
+                tekst = f.read()
+            self.assertIn("KOR/1;KOREKTA;niespojny;", tekst)
+            self.assertIn(";0,50;", tekst)           # największa różnica jako moduł, z przecinkiem
