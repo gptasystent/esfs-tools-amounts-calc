@@ -44,7 +44,7 @@ from .bledy import (BRAK_CENY, CENA_UJEMNA, ILOSC_UJEMNA, NARZUT_I_MARZA, NIEPOP
                     NIEPOPRAWNY_TRYB, RABAT_POZA_ZAKRESEM, BladWalidacji)
 from .config import (DOMYSLNA, KONTEKST, ROZKLADY, ROZKLAD_NAJWIEKSZA, TRYB_BRUTTO, TRYB_NETTO,
                      TRYBY, TRYBY_VAT, VAT_PER_POZYCJA)
-from .model import (DokumentWynik, PodsumowanieStawki, PozycjaWynik, grupa_alternatywy, pozycja_z_slownika)
+from .model import (DokumentWynik, PodsumowanieStawki, PozycjaWynik, pozycja_z_slownika, ustal_opcje)
 from .stawki import do_decimal, normalizuj_stawke, wartosc_stawki
 
 _100 = Decimal(100)
@@ -138,7 +138,8 @@ def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf, dopusc_ujemne=False):
 
 def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
            narzut_proc=None, marza_proc=None, tryb_vat=None, rozklad_korekty=None,
-           dopusc_ujemne=False, ilosc_zestawu=False, wlaczone_alternatywy=None, konfiguracja=DOMYSLNA):
+           dopusc_ujemne=False, ilosc_zestawu=False, wlaczone_alternatywy=None, konfiguracja=DOMYSLNA,
+           tryb_opcji=None):
     """Przelicza dokument. `pozycje`: lista Pozycja lub słowników. Zwraca DokumentWynik.
 
     `dopusc_ujemne=True` dopuszcza ujemne ilości i ceny (rabat jako osobna linia, korekta, zwrot);
@@ -149,6 +150,9 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
     N x dzieci (dzieci nie są liczone drugi raz). Domyślnie False: ilość zestawu jest ignorowana.
     `wlaczone_alternatywy`: które pozycje z `alternatywa` / `grupa_opcji` wchodzą do sum - None (żadna),
     "wszystkie" albo kolekcja indeksów pozycji; bez takich pól nic się nie zmienia.
+    Tryb jawny opcji: gdy którakolwiek pozycja najwyższego poziomu ma `tryb_opcji` ("brak" | "opcja" |
+    "alternatywa"), do sum wchodzą pozycje "brak" oraz opcje i alternatywy z `wybrana`=true, a
+    `wlaczone_alternatywy` jest ignorowane. `tryb_opcji` (parametr): "auto" (domyślnie) | "jawny" | "awaryjny".
 
     Waluta jest tylko etykietą (bez przeliczeń kursowych); zaokrąglanie jak dla PLN.
     """
@@ -173,9 +177,11 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
         dzieci = zbuduj_hierarchie([(w.id, w.parent_id) for w in wejscia])
         liscie = [i for i in range(len(wejscia)) if i not in dzieci]  # liście liczone są na 1 szt. zestawu
         rodzic = rodzice(dzieci)
-        alt = {i: (grupa_alternatywy(w.alternatywa, w.grupa_opcji) if i not in rodzic else None)
-               for i, w in enumerate(wejscia)}
-        if wlaczone_alternatywy is None:
+        opcje = ustal_opcje(wejscia, rodzic, tryb_opcji)
+        alt = opcje["alt"]
+        if opcje["jawny"]:
+            wlaczone = opcje["wlaczone"]
+        elif wlaczone_alternatywy is None:
             wlaczone = frozenset()
         elif wlaczone_alternatywy == "wszystkie":
             wlaczone = frozenset(i for i, g in alt.items() if g is not None)
@@ -252,7 +258,7 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
             wyniki_lisci[i] = PozycjaWynik(
                 indeks=i, ilosc=ilosci[j], cena_po_rabacie=ceny_po[j], rabat_proc=rabaty[j],
                 stawka_vat=stawki[j], netto=netto[j], vat=vat[j], brutto=brutto[j], id=w.id, parent_id=w.parent_id,
-                alternatywa=alt[i])
+                alternatywa=alt[i], tryb_opcji=opcje["tryby"].get(i), wybrana=opcje["wybrana"].get(i))
         # pozycje nadrzędne (zestawy): N x suma dzieci (dzieci na 1 szt.), rekurencyjnie; dla N = 1 zwykła suma
         wiersze = []
         for i, w in enumerate(wejscia):
@@ -274,7 +280,7 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
                 indeks=i, ilosc=ilosci_zestawow[i], cena_po_rabacie=Decimal(0),
                 rabat_proc=Decimal(0), stawka_vat=normalizuj_stawke(w.stawka_vat, "pozycje[%d].stawka_vat" % i),
                 netto=o["netto"], vat=o["vat"], brutto=o["brutto"], id=w.id, parent_id=w.parent_id, zestaw=True,
-                alternatywa=alt[i]))
+                alternatywa=alt[i], tryb_opcji=opcje["tryby"].get(i), wybrana=opcje["wybrana"].get(i)))
         wyniki = tuple(wyniki)
         sumy_stawek = podsumowanie_stawek(wiersze, dzieci, rozw, wlaczone, konf)
         podsumowanie = tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"]) for s, v in sumy_stawek.items())
@@ -285,4 +291,6 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
             suma_brutto=sum((p.brutto for p in podsumowanie), Decimal(0)),
             rozbieznosc_vat=rozbieznosc, ilosc_zestawu=bool(ilosc_zestawu),
             wlaczone_alternatywy=tuple(sorted(wlaczone)),
-            alternatywy="wybrane" if any(g is not None for g in alt.values()) else "brak")
+            alternatywy=("jawne" if opcje["jawny"]
+                         else "wybrane" if any(g is not None for g in alt.values()) else "brak"),
+            opcje_jawne=opcje["jawny"])
