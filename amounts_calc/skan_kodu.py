@@ -508,9 +508,57 @@ def _regula_float_py(p, tekst, start):
             p.dodaj(_linia_w(tekst, start, m.start()), FLOAT_W_FUNKCJI_KWOTOWEJ)
 
 
+_SQL_RZUT_PO = re.compile(r"\s*(?:\)\s*)*(?:<=|>=|<>|!=|=(?!>)|[*/+\-<>])")
+_SQL_RZUT_PRZED = re.compile(r"(?:<=|>=|<>|!=|[*/+\-<>])\s*$")
+
+
+def _poczatek_operandu(tekst, koniec):
+    """Indeks początku operandu (identyfikatora albo wywołania funkcji / grupy w nawiasach) kończącego się przed `koniec`."""
+    i = koniec
+    while i > 0 and tekst[i - 1].isspace():
+        i -= 1
+    if i > 0 and tekst[i - 1] == ")":
+        glebokosc = 0
+        while i > 0:
+            i -= 1
+            if tekst[i] == ")":
+                glebokosc += 1
+            elif tekst[i] == "(":
+                glebokosc -= 1
+                if glebokosc == 0:
+                    break
+        while i > 0 and (tekst[i - 1].isalnum() or tekst[i - 1] in "_."):
+            i -= 1
+        return i
+    while i > 0 and (tekst[i - 1].isalnum() or tekst[i - 1] in '_."'):
+        i -= 1
+    return i
+
+
+def _rzut_w_obliczeniu(tekst, m):
+    """Rzutowanie na float w SQL: True tylko, gdy stoi wewnątrz dalszego obliczenia - rzutowane wyrażenie jest operandem
+    działania (`a::float * b`, `0.23 * a::float`) albo porównania (`a::float > 100`). Rzutowanie na końcu wyrażenia
+    SELECT (`::float AS x`, `::float,`, `::float FROM`, także po SUM / COALESCE / odejmowaniu w środku) to tylko format
+    wyniku, więc daje False. None - to nie jest rzutowanie (np. typ kolumny)."""
+    if tekst[max(0, m.start() - 2):m.start()] == "::":
+        poczatek, po = _poczatek_operandu(tekst, m.start() - 2), m.end()
+    else:
+        reszta = re.match(r"\s*\)", tekst[m.end():])
+        if not (re.search(r"\bAS\s+$", tekst[:m.start()], re.I) and reszta):
+            return None
+        po = m.end() + reszta.end()
+        poczatek = _poczatek_operandu(tekst, po)
+        if tekst[poczatek:poczatek + 4].upper() != "CAST":
+            return None
+    return bool(_SQL_RZUT_PRZED.search(tekst[:poczatek]) or _SQL_RZUT_PO.match(tekst[po:]))
+
+
 def _regula_sql_float_round(p, tekst, start):
-    """4. SQL: float/real zamiast numeric; ROUND(x), ROUND(x, 0|1) na kwotach."""
+    """4. SQL: float/real zamiast numeric (rzutowanie `::float` / CAST tylko wewnątrz obliczenia); ROUND(x),
+    ROUND(x, 0|1) na kwotach."""
     for m in _SQL_FLOAT.finditer(tekst):
+        if _rzut_w_obliczeniu(tekst, m) is False:
+            continue                       # rzut na końcu wyrażenia: format wyniku zapytania, nie obliczenie
         if ma_kwote(_linia_tekstu(tekst, m.start())):
             p.dodaj(_linia_w(tekst, start, m.start()), FLOAT_W_FUNKCJI_KWOTOWEJ)
     for m in _SQL_ROUND.finditer(tekst):
