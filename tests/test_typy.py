@@ -105,9 +105,10 @@ class TestGrupowaniePoTypie(unittest.TestCase):
     def test_liczby_per_typ(self):
         _, p = sprawdz_partie(self.dok, pomin_typy="KOREKTA")
         t = p["wg_typu"]
-        self.assertEqual(t["FV"], {"dokumentow": 3, "spojny": 2, "niespojny": 1, "blad": 0, "pominiety": 0})
-        self.assertEqual(t["ZK"], {"dokumentow": 2, "spojny": 1, "niespojny": 0, "blad": 1, "pominiety": 0})
-        self.assertEqual(t["KOREKTA"], {"dokumentow": 1, "spojny": 0, "niespojny": 0, "blad": 0, "pominiety": 1})
+        zero = dict.fromkeys(("dokumentow", "spojny", "drobiazg", "niepelny", "niespojny", "blad", "pominiety"), 0)
+        self.assertEqual(t["FV"], dict(zero, dokumentow=3, spojny=2, niespojny=1))
+        self.assertEqual(t["ZK"], dict(zero, dokumentow=2, spojny=1, blad=1))
+        self.assertEqual(t["KOREKTA"], dict(zero, dokumentow=1, pominiety=1))
         self.assertEqual(t[BRAK_TYPU]["dokumentow"], 2)
         self.assertEqual(sum(v["dokumentow"] for v in t.values()), len(self.dok))
         self.assertEqual(list(t)[0], "FV")   # malejąco wg liczby dokumentów
