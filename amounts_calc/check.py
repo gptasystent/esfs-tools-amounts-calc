@@ -1,7 +1,8 @@
 """Wsadowe sprawdzanie dokumentów (np. wyeksportowanych z bazy do JSON) - bez wysyłania danych do repo.
 
     python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
-        [--json wynik.json] [--max-przyklady N] [--mapowanie mapowanie.json]
+        [--json wynik.json] [--csv wynik.csv] [--max-przyklady N] [--pomin-typy TYP1,TYP2]
+        [--mapowanie mapowanie.json]
 
 Dla każdego dokumentu:
   a) sprawdz_spojnosc na zapisanych danych (niespójność zapisanych sum),
@@ -15,6 +16,7 @@ Kod wyjścia: 0 = nic nie wymaga uwagi (drobiazgi i dane niepełne nie liczą si
 niespójne lub błędne, 2 = błąd wejścia (plik/JSON/mapowanie).
 """
 import argparse
+import csv
 import json
 import sys
 import uuid
@@ -417,6 +419,41 @@ def zapisz_json(sciezka, obiekt):
         f.write("".join(wynik) + "\n")
 
 
+KOLUMNY_CSV = ("indeks", "id", "typ", "status", "kody", "najwieksza_roznica", "tryb_vat_pasuje")
+
+
+def _komorka_tekstowa(x):
+    """Tekst do CSV; wartości zaczynające się od =, +, @ (i - przed nie-cyfrą) dostają apostrof,
+    żeby arkusz nie wykonał ich jako formuły."""
+    if x is None:
+        return ""
+    if isinstance(x, Decimal):
+        t = format(x, "f")
+    elif isinstance(x, (dict, list)):
+        t = json.dumps(x, ensure_ascii=False)
+    else:
+        t = str(x)
+    if t[:1] in ("=", "+", "@", "\t", "\r") or (t[:1] == "-" and not t[1:2].isdigit() and t[1:2] != "."):
+        return "'" + t
+    return t
+
+
+def zapisz_csv(sciezka, wyniki):
+    """Jedna linia na dokument z problemem. Separator ';', UTF-8 z BOM, końce linii CRLF i przecinek
+    dziesiętny w kwotach - tak, żeby polski Excel otworzył plik dwuklikiem."""
+    with open(sciezka, "w", encoding="utf-8-sig", newline="") as f:
+        zapis = csv.writer(f, delimiter=";", lineterminator="\r\n")
+        zapis.writerow(KOLUMNY_CSV)
+        for w in wyniki:
+            if not ma_problem(w):
+                continue
+            kody = sorted({n["kod"] for n in w["niespojnosci"]} | {c["kod"] for c in w["przyczyny"]}
+                          | ({w["blad"]["kod"]} if w["blad"] else set()))
+            zapis.writerow([w["indeks"], _komorka_tekstowa(w["id"]), _komorka_tekstowa(w["typ"]), w["status"],
+                            ", ".join(kody), format_kwoty(w["max_roznica"]).replace(".", ","),
+                            w["tryb_pasujacy"] or ""])
+
+
 def _parser():
     p = argparse.ArgumentParser(prog="python -m amounts_calc.check", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -427,6 +464,8 @@ def _parser():
                    help="zapisz listę dokumentów z problemami do pliku JSON")
     p.add_argument("--max-przyklady", type=int, default=10, metavar="N",
                    help="ile największych rozbieżności pokazać w podsumowaniu (domyślnie 10)")
+    p.add_argument("--csv", dest="csv_wyjscie", metavar="WYNIK.csv",
+                   help="zapisz dokumenty z problemami jako CSV (separator ';', UTF-8 z BOM - do Excela)")
     p.add_argument("--pomin-typy", dest="pomin_typy", default="", metavar="TYP1,TYP2",
                    help="typy dokumentów do pominięcia, np. KOREKTA,ROZ (wielkość liter bez znaczenia)")
     p.add_argument("--mapowanie", metavar="MAPOWANIE.json",
@@ -450,6 +489,8 @@ def main(argv=None):
         wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy)
         if args.json_wyjscie:
             zapisz_json(args.json_wyjscie, [wynik_json(w) for w in wyniki if ma_problem(w)])
+        if args.csv_wyjscie:
+            zapisz_csv(args.csv_wyjscie, wyniki)
     except (OSError, ValueError, BladWalidacji) as e:  # json.JSONDecodeError i UnicodeDecodeError to ValueError
         print("Błąd: %s" % e, file=sys.stderr)
         return 2
