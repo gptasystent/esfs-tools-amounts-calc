@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (369 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (465 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -52,11 +52,13 @@ amounts_calc/
   stawki.py       stawki 23/8/5/0/'zw'/'np', konwersja liczb (float zabroniony)
   model.py        Pozycja (wejście), PozycjaWynik, PodsumowanieStawki, DokumentWynik
   obliczenia.py   oblicz(): od netto / od brutto, rabaty, VAT per pozycja / per stawka
-  marza.py        narzut vs marża
+  marza.py        narzut vs marża; cena_sprzedazy() - cena sprzedaży pozycji z zakupu i narzutu do grosza
   spojnosc.py     sprawdz_spojnosc(), porownaj()
   adapter.py      z_wiersza(): dowolne nazwy pól -> słownik dokumentu; wczytanie JSON jako Decimal
   check.py        CLI: python -m amounts_calc.check (wsadowe sprawdzanie dokumentów, JSON/CSV)
-  klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA, VAT_WYLICZONY_* - przyczyny niespójności (czyste funkcje)
+  klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA(_NARZUT), VAT_WYLICZONY_* - przyczyny niespójności (czyste funkcje)
+  oferty.py       pozycje z ceną zakupu i narzutem, zestawy z własnym narzutem/rabatem (dane dla check.py)
+  podpowiedzi.py  ZESTAW_NIEODSWIEZONY / BRUTTO_ROWNE_NETTO / inna - podpowiedź dla każdej niespójności
   hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja i liście pod pozycją
   formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
@@ -246,10 +248,14 @@ albo `obliczenia`).
 | `NAGLOWEK_ZERO` | wszystkie sumy nagłówka równe 0 przy niezerowych pozycjach |
 | `NAGLOWEK_NIZSZY` / `NAGLOWEK_WYZSZY` | nagłówek różni się od sumy pozycji o więcej niż 0,01 (porównanie: netto, potem brutto, potem VAT; pokazuje różnicę, różnice na pozostałych polach i `mozliwe_pozycje` - pozycje o wartości równej różnicy, np. pominiętą albo policzoną drugi raz) |
 | `ZESTAW_LICZONY_PODWOJNIE` | nagłówek = suma pozycji "liści" + kwoty pozycji nadrzędnych (zestawów) |
+| `ZESTAW_NIEODSWIEZONY` | **podpowiedź** do `ZESTAW_ROZNY_OD_DZIECI` (bez wyjaśnienia narzutem/rabatem): pozycja nadrzędna nie została przeliczona po zmianie dziecka. Dowody (`dowody` w przyczynie): różnica równa wartości dokładnie jednego dziecka; nagłówek zgadza się z sumą dzieci, a zestaw nie; albo nagłówek zgadza się z zapisanymi kwotami zestawów (`naglowek_liczony_z_zapisanych_zestawow`) |
+| `BRUTTO_ROWNE_NETTO` | **podpowiedź**: kwota brutto równa netto mimo stawki VAT > 0 (brak VAT w brutto) - pozycje, wiersz stawki albo sumy dokumentu; pomijane są kwoty, od których VAT zaokrągla się do mniej niż grosza |
+| `ZESTAW_Z_NARZUTEM` | **informacja, nie błąd**: pozycja nadrzędna (zestaw) ma własny `narzut_proc` / `marza_proc` / `rabat_proc`, a jej zapisane kwoty różnią się od sumy dzieci dokładnie o ten narzut/rabat (netto w granicach 0,01, VAT i brutto z tolerancją 0,01 na dziecko). Taka różnica nie jest zgłaszana jako `ZESTAW_ROZNY_OD_DZIECI`. Jeśli nagłówek dokumentu = suma liści + różnice takich zestawów, sumy dokumentu też uznawane są za zgodne (`naglowek_uwzglednia_zestawy: true`) |
 | `ILOSC_X_CENA` | wartość pozycji (netto w trybie od netto, brutto w trybie od brutto) różni się od `ilość x cena po rabacie` (z rabatem pozycji i dokumentu) o więcej niż 0,01; wskazuje pozycje i różnice |
 | `VAT_WYLICZONY_ZGODNY` | pozycje nie mają pola VAT, ale mają `stawka_vat` i `netto`: VAT i brutto zostały wyliczone biblioteką (zapisane netto traktowane jako gotowa wartość pozycji, w obu trybach VAT) i **suma wyliczonego VAT zgadza się z VAT w nagłówku** (w którymkolwiek trybie; `tryby_vat` mówi w którym). Dokument przestaje być "niepełny" |
 | `VAT_WYLICZONY_ROZNY` | jw., ale suma wyliczonego VAT różni się od nagłówka: `roznica` = nagłówek - wyliczony (dla bliższego trybu), `wg_stawek` (netto i VAT każdej stawki), `stawki_tlumaczace` (najmniejsze zbiory stawek, których VAT równa się różnicy, np. `[["8"]]` - nagłówek pomija VAT stawki 8%) i `roznica_brutto`. Różnica <= 0,01 przy niezaokrąglonym netto to `POLGROSZ` |
 | `BRAK_VAT_W_POZYCJACH` | pozycje nie mają pola VAT **i** brak stawki (w którejś pozycji): **dane niepełne, nie błąd**. Nie da się wyliczyć VAT, więc liczone jest, co się da: netto (i brutto, jeśli jest) pozycji vs nagłówek, `ILOSC_X_CENA`, sumy nagłówka. Brak ilości, ceny lub stawki nie robi z takiego dokumentu błędu |
+| `ILOSC_X_CENA_NARZUT` | pozycje z `cena_zakupu_jedn` i `narzut_proc` (albo `marza_proc`): cena sprzedaży = `zakup * (1 + narzut/100)` zaokrąglona do grosza, wartość = ilość x cena sprzedaży po rabacie (z rabatem dokumentu), porównywana z zapisanym `netto` (tolerancja 0,01). Zastępuje `ILOSC_X_CENA` dla takich pozycji. Dwa warianty opisu: **"cena sprzedaży nie zgadza się z zakup+narzut"** (niezgodność; szczegóły: `cena_sprzedazy_oczekiwana`, `cena_sprzedazy_zapisana`, `wyjasnienie` - czy pominięto narzut / rabat, `narzut_wynikowy`) oraz **"narzut/rabat tłumaczy różnicę"** (`informacja: true`: ilość x `cena_netto_jedn` bez narzutu by się nie zgadzała, a z narzutem się zgadza) |
 | `NIEZGODNY_Z_BIBLIOTEKA` | żaden tryb VAT nie odtwarza zapisanych sum, a nic innego tego nie tłumaczy |
 
 Kody spójności z `sprawdz_spojnosc` (`SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`, `NETTO_PLUS_VAT_ROZNE_OD_BRUTTO`,
@@ -258,7 +264,8 @@ Kody spójności z `sprawdz_spojnosc` (`SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`, `NETTO
 `NIEPOPRAWNA_HIERARCHIA`) trafiają do tego samego rozkładu kodów.
 
 **Status dokumentu** (jeden, wg pierwszeństwa): `blad` > `niespojny` (jest niespójność inna niż POLGROSZ
-albo przyczyna z tabeli poza POLGROSZ, `BRAK_VAT_W_POZYCJACH` i `VAT_WYLICZONY_ZGODNY`) > `niepelny` (tylko
+albo przyczyna z tabeli poza POLGROSZ, `BRAK_VAT_W_POZYCJACH`, `VAT_WYLICZONY_ZGODNY`, `ZESTAW_Z_NARZUTEM`
+i przyczynami z `informacja: true`, np. `ILOSC_X_CENA_NARZUT` w wariancie "narzut/rabat tłumaczy różnicę") > `niepelny` (tylko
 `BRAK_VAT_W_POZYCJACH`) > `drobiazg` (tylko `POLGROSZ`) > `spojny`; `pominiety` dla typów z `--pomin-typy`.
 Dokument z `BRAK_VAT_W_POZYCJACH` i prawdziwą niespójnością jest `niespojny`, a kod braku VAT zostaje
 na liście przyczyn. Dokument z `VAT_WYLICZONY_ZGODNY` i bez innych przyczyn jest `spojny` (nie trafia do
@@ -364,7 +371,7 @@ i pominiętych; `--max-przyklady` ogranicza długość listy).
 `niespojny`, `niepelny` albo `drobiazg` (spójne i pominięte nie są listowane). Wpis: `indeks` (pozycja
 w pliku), `id` (bez zmian), `typ` (zawsze tekst), `status`, `dane` (`pelne` / `brak_kwot` / `brak_vat`),
 `blad` (`{kod, pole, etap, wiadomosc}` albo `null`), `niespojnosci` (lista z `sprawdz_spojnosc`: `kod, zakres,
-pole, oczekiwano, jest, roznica, opis`; wpisy będące półgroszem mają `drobiazg: true`), `przyczyny` (kody
+pole, oczekiwano, jest, roznica, opis`; wpisy będące półgroszem mają `drobiazg: true`; każdy ma `podpowiedz`), `przyczyny` (kody
 z tabeli wyżej ze szczegółami), `pasuje` (`{per_stawka, per_pozycja}`), `tryb_pasujacy`, `rozbieznosci` (per
 tryb VAT lista `{pole, zapisane, biblioteka, roznica}`; `roznica` = biblioteka - zapisane),
 `liczba_roznic_pozycji`, `max_roznica`, `pominieto_pozycje`. Kwoty są stringami w postaci kanonicznej.
@@ -375,18 +382,19 @@ z zachowaniem znaczących miejsc i co najmniej dwóch miejsc po przecinku: `1402
 Wyjątek: `id` przechodzi bez zmian (liczba z ułamkiem w `id` jest zapisywana tak, jak była w pliku).
 
 **CSV** (`--csv wynik.csv`): jedna linia na dokument z problemem (te same dokumenty co w JSON), kolumny
-`indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje`. Separator `;`, kodowanie UTF-8 **z BOM**,
+`indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje;podpowiedz`. Separator `;`, kodowanie UTF-8 **z BOM**,
 końce linii CRLF i przecinek dziesiętny w kwotach (`98,40`), żeby polski Excel otworzył plik dwuklikiem
 bez kreatora importu. `kody` to wszystkie kody dokumentu oddzielone przecinkami, `tryb_vat_pasuje` to
-`oba` / `per_stawka` / `per_pozycja` / `zaden` (puste dla dokumentu z błędem). Wartości tekstowe
+`oba` / `per_stawka` / `per_pozycja` / `zaden` (puste dla dokumentu z błędem), `podpowiedz` to podpowiedź zbiorcza
+(patrz "Oferty i zamówienia z narzutem"). Wartości tekstowe
 zaczynające się od `=`, `+`, `@` lub `-` (przed nie-cyfrą) dostają apostrof, żeby arkusz nie wykonał ich
 jako formuły.
 
 ```
-indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje
-1;FV/2;FV;drobiazg;NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, POLGROSZ, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;0,005;zaden
-9;FV/7;FV;niepelny;BRAK_VAT_W_POZYCJACH;0,00;
-10;FV/8;FV;niespojny;VAT_WYLICZONY_ROZNY;2,16;
+indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje;podpowiedz
+1;FV/2;FV;drobiazg;NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, POLGROSZ, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;0,005;zaden;
+9;FV/7;FV;niepelny;BRAK_VAT_W_POZYCJACH;0,00;;
+10;FV/8;FV;niespojny;VAT_WYLICZONY_ROZNY;2,16;;inna
 ```
 
 **Kod wyjścia:** 0 - nic nie wymaga uwagi (drobiazgi, dane niepełne i pominięte typy nie liczą się),
@@ -415,6 +423,149 @@ Zalecany tryb pracy: eksport próbki (np. ostatni miesiąc) do JSON -> CLI lokal
 z pierwszych 5 linii widać, ile jest do zrobienia, z `--csv` pracujesz w Excelu po `status` i `kody`, a `id`
 dokumentów z problemami sprawdzasz już w aplikacji. Raportu z prawdziwymi `id` nie wkładaj do repo.
 
+### Oferty i zamówienia z narzutem
+
+Pozycje ofert i zamówień mają zwykle cenę **zakupu** i narzut (albo marżę), a cena sprzedaży z nich wynika.
+W takich danych `cena_netto_jedn` bywa po prostu ceną zakupu, więc zwykłe `ilość x cena_netto_jedn` nie
+zgadza się z zapisanym `netto` w prawie każdej pozycji. Dla pozycji z poniższymi polami CLI i `oblicz()`
+liczą cenę sprzedaży z zakupu i narzutu.
+
+| Pole pozycji | Znaczenie |
+|---|---|
+| `cena_zakupu_jedn` | jednostkowa cena zakupu |
+| `narzut_proc` | narzut %: `cena sprzedaży = zakup * (1 + narzut/100)` |
+| `marza_proc` | alternatywnie marża %: `cena sprzedaży = zakup / (1 - marża/100)` (nie razem z narzutem: `NARZUT_I_MARZA`) |
+
+Reguła (tryb od netto; w trybie od brutto te pola są ignorowane):
+
+1. cena sprzedaży jednostkowa = zakup z narzutem (marżą), **zaokrąglona do grosza** według konfiguracji
+   (`Konfiguracja.kwota`; `marza.cena_sprzedazy`) - to jedyne zaokrąglenie ceny sprzedaży,
+2. cena po rabacie pozycji = `cena sprzedaży * (1 - rabat/100)` -> 4 miejsca,
+3. wartość netto = `ilość * cena po rabacie` -> grosz, potem rabat dokumentu jak zwykle.
+
+Narzut ma pierwszeństwo przed `cena_netto_jedn`. Pola zakupu i narzutu są potrzebne **oba** (sam narzut
+bez ceny zakupu jest ignorowany). Różnica względem narzutu dokumentu (`oblicz(..., narzut_proc=...)`
+z `koszt_zakupu_jedn`): tam cena jest zaokrąglana do miejsc ceny (4), tu do grosza.
+
+```python
+from amounts_calc import oblicz
+
+d = oblicz([
+    {"ilosc": 2, "cena_zakupu_jedn": "60.00",  "narzut_proc": 25, "stawka_vat": 23},               # sprzedaż 75,00
+    {"ilosc": 1, "cena_zakupu_jedn": "400.00", "narzut_proc": 20, "rabat_proc": 10, "stawka_vat": 23},  # 480,00 -10%
+])
+d.suma_netto, d.suma_vat, d.suma_brutto      # 582.00, 133.86, 715.86
+```
+
+**Sprawdzanie w CLI - `ILOSC_X_CENA_NARZUT`.** Dla pozycji z narzutem zamiast `ILOSC_X_CENA` porównywane jest
+`ilość x cena sprzedaży (po rabacie)` z zapisanym `netto` (tolerancja 0,01). Kod ma dwa warianty opisu:
+
+- **"cena sprzedaży nie zgadza się z zakup+narzut"** - niezgodność (dokument `niespojny`). Szczegóły w
+  `pozycje[]`: `oczekiwane` i `zapisane` netto, `cena_sprzedazy_oczekiwana`, `cena_sprzedazy_zapisana`,
+  `wyjasnienie` (np. "narzut nie został zastosowany", "rabat nie został zastosowany", "nie zastosowano ani
+  narzutu, ani rabatu") i `narzut_wynikowy` - jaki narzut wynikałby z zapisanej wartości;
+- **"narzut/rabat tłumaczy różnicę"** - informacja (`informacja: true`, w rozkładzie kodów z dopiskiem
+  `(informacja)`): zwykłe `ilość x cena_netto_jedn` by się nie zgadzało, a z narzutem zgadza się. To nie błąd.
+
+`cena_netto_jedn` równa cenie zakupu jest traktowana jako cena zakupu; jeśli jest inna, jest traktowana jako
+zapisana cena sprzedaży i porównywana z `zakup + narzut` (rozbieżność to ten sam kod).
+
+**Zestawy z własnym narzutem lub rabatem.** Pozycja nadrzędna (zestaw) może mieć własne `narzut_proc` /
+`marza_proc` / `rabat_proc`. Jeśli jej zapisane kwoty różnią się od sumy dzieci dokładnie o ten narzut/rabat
+(`suma dzieci * (1 + narzut/100) * (1 - rabat/100)`; netto w granicach 0,01, VAT i brutto z tolerancją 0,01 na
+dziecko), to jest **informacja** `ZESTAW_Z_NARZUTEM`, a nie `ZESTAW_ROZNY_OD_DZIECI`. Jeśli nagłówek dokumentu
+= suma liści + takie różnice zestawów najwyższego poziomu, sumy dokumentu także są uznawane za zgodne
+(`naglowek_uwzglednia_zestawy: true`); nagłówek równy samej sumie dzieci jest zgodny jak dotąd. Bez własnego
+narzutu (albo gdy kwota do niego nie pasuje) zostaje `ZESTAW_ROZNY_OD_DZIECI`. Zestawy zagnieżdżone są
+oceniane względem swoich liści. `oblicz()` nie stosuje narzutu zestawu do sum (sumy liczą się z liści).
+
+**Podpowiedź przyczyny.** Każda niespójność w JSON ma pole `podpowiedz`, a dokument `podpowiedz` zbiorczą
+(CSV: ostatnia kolumna, podsumowanie: osobna linia z liczbą dokumentów):
+
+| Podpowiedź | Znaczenie |
+|---|---|
+| `ZESTAW_NIEODSWIEZONY` | zestaw nie został przeliczony po zmianie dziecka. Dowody (`dowody` w przyczynie): różnica równa wartości dokładnie jednego dziecka; nagłówek zgadza się z sumą dzieci, a zestaw nie; nagłówek zgadza się z zapisanymi kwotami zestawów |
+| `BRUTTO_ROWNE_NETTO` | brutto równe netto mimo stawki VAT > 0 (brak VAT w brutto), dla pozycji, wiersza stawki albo sum dokumentu; kwoty, od których VAT zaokrągla się do mniej niż grosza, są pomijane |
+| `POLGROSZ` | drobiazg (patrz kody przyczyn) |
+| `inna` | nic z powyższego |
+
+Oba pierwsze kody pojawiają się też jako osobne przyczyny (`ZESTAW_NIEODSWIEZONY`, `BRUTTO_ROWNE_NETTO`) w
+rozkładzie kodów i w `kody`.
+
+**Mapowanie nazw** (`--mapowanie`) obejmuje nowe pola pozycji bez zmiany kodu:
+
+```json
+{"pozycja": {"cena_zakupu_jedn": "kosztzak", "narzut_proc": ["narzut_handl", "narzut"], "marza_proc": "marza_handl"}}
+```
+
+Domyślne aliasy: `cena_zakupu_jedn` = `cena_zakupu` / `zakup`, `narzut_proc` = `narzut`, `marza_proc` = `marza`.
+
+**Przykład** (dane fikcyjne, plik `oferty.json`: poprawna oferta z narzutem, oferta bez zastosowanego narzutu, ZK z
+zestawem "krzesło + 4 nogi" z narzutem zestawu 10%, ZK z zestawem nieodświeżonym po dodaniu nóg, faktura z brutto
+równym netto):
+
+```
+$ python -m amounts_calc.check oferty.json --json problemy.json --csv problemy.csv --max-przyklady 3
+Do sprawdzenia: 3 (niespójne: 3, błędne: 0)
+Tylko drobiazgi (POLGROSZ): 0
+Niepełne dane (brak VAT w pozycjach): 0
+Pominięte typy: brak (patrz --pomin-typy)
+Bez uwag: 2 z 5 dokumentów
+
+Sprawdzono dokumentów: 5 (w tym pominięto: 0)
+  spójnych (bez przyczyn):              2
+  z niespójnością zapisanych sum:       2
+  z błędem (walidacja/struktura):       0
+  w raporcie (JSON/CSV): 3
+
+Rozkład kodów (liczba dokumentów):
+  BRUTTO_ROWNE_NETTO                       1
+  ILOSC_X_CENA_NARZUT                      1
+  ILOSC_X_CENA_NARZUT (informacja)         1
+  NETTO_PLUS_VAT_ROZNE_OD_BRUTTO           1
+  ZESTAW_NIEODSWIEZONY                     1
+  ZESTAW_ROZNY_OD_DZIECI                   1
+  ZESTAW_Z_NARZUTEM                        1
+
+Podpowiedź przyczyny niespójności (liczba dokumentów): ZESTAW_NIEODSWIEZONY=1, BRUTTO_ROWNE_NETTO=1
+
+Zgodność zapisanych sum z biblioteką (dokumenty bez błędu: 5):
+  pasuje per_stawka:  3
+  pasuje per_pozycja: 3
+  rozkład: oba=3, tylko per_stawka=0, tylko per_pozycja=0, żaden=2
+
+Wg typu dokumentu:
+  typ     dokumentów  spójne  drobiazg  niepełne  niespójne  błędne  pominięte
+  OFERTA           2       1         0         0          1       0          0
+  ZK               2       1         0         0          1       0          0
+  FV               1       0         0         0          1       0          0
+
+Największe rozbieżności (3 z 3):
+  1. id=OF/2 (indeks 1): 36.90 (3690 gr) - ILOSC_X_CENA_NARZUT
+  2. id=ZK/2 (indeks 3): 36.90 (3690 gr) - ZESTAW_NIEODSWIEZONY, ZESTAW_ROZNY_OD_DZIECI
+  3. id=FV/9 (indeks 4): 23.00 (2300 gr) - BRUTTO_ROWNE_NETTO, NETTO_PLUS_VAT_ROZNE_OD_BRUTTO
+```
+
+CSV (`problemy.csv`):
+
+```
+indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje;podpowiedz
+1;OF/2;OFERTA;niespojny;ILOSC_X_CENA_NARZUT;36,90;zaden;
+3;ZK/2;ZK;niespojny;ZESTAW_NIEODSWIEZONY, ZESTAW_ROZNY_OD_DZIECI;36,90;oba;ZESTAW_NIEODSWIEZONY
+4;FV/9;FV;niespojny;BRUTTO_ROWNE_NETTO, NETTO_PLUS_VAT_ROZNE_OD_BRUTTO;23,00;zaden;BRUTTO_ROWNE_NETTO
+```
+
+Dokument `OF/1` (poprawna oferta) ma w raporcie tylko informację `ILOSC_X_CENA_NARZUT (informacja)`, a `ZK/1` -
+`ZESTAW_Z_NARZUTEM`; oba są `spojny` i nie trafiają do JSON ani CSV. Przyczyna z `problemy.json` dla `OF/2`:
+
+```json
+{"kod": "ILOSC_X_CENA_NARZUT", "opis": "cena sprzedaży nie zgadza się z zakup+narzut", "pole": "netto",
+ "liczba": 1, "roznica": "-30.00",
+ "pozycje": [{"indeks": 0, "id": null, "zapisane": "120.00", "oczekiwane": "150.00", "roznica": "-30.00",
+              "cena_sprzedazy_oczekiwana": "75.00", "cena_sprzedazy_zapisana": null,
+              "wyjasnienie": "narzut nie został zastosowany", "narzut_wynikowy": "0.00"}]}
+```
+
 ### Typowe wyniki i co z nimi zrobić
 
 Jedna linia na kod. Zalecenia: **zignoruj** - nic nie trzeba robić; **sprawdź dokument** - otwórz dokument
@@ -432,8 +583,12 @@ i z różnicami rzędu groszy, to nie błąd dokumentów, tylko inna reguła zao
 | `NAGLOWEK_NIZSZY` | **sprawdź dokument** - nagłówek pomija część pozycji; `mozliwe_pozycje` wskazuje pozycję o wartości równej różnicy |
 | `NAGLOWEK_WYZSZY` | **sprawdź dokument** - nagłówek zawiera więcej niż pozycje (pozycja usunięta po przeliczeniu albo policzona dwa razy) |
 | `ZESTAW_LICZONY_PODWOJNIE` | **sprawdź dokument i poprawę w źródle** - suma nagłówka liczy zestaw (pozycję nadrzędną) obok jego dzieci |
-| `ZESTAW_ROZNY_OD_DZIECI` | **sprawdź dokument** - kwota pozycji nadrzędnej nie jest sumą jej dzieci |
+| `ZESTAW_ROZNY_OD_DZIECI` | **sprawdź dokument** - kwota pozycji nadrzędnej nie jest sumą jej dzieci i nie wynika z jej własnego narzutu/rabatu |
+| `ZESTAW_NIEODSWIEZONY` | **sprawdź dokument** - przelicz zestaw (zapisz dokument ponownie po zmianie dziecka); jeśli to częste, błąd jest w aplikacji, która nie odświeża zestawu |
+| `BRUTTO_ROWNE_NETTO` | **sprawdź dokument** - brak VAT w brutto; zwykle błąd zapisu lub import bez przeliczenia, nie zaokrąglenie |
+| `ZESTAW_Z_NARZUTEM` | **zignoruj** - różnica zestawu względem sumy dzieci wynika z jego własnego narzutu lub rabatu |
 | `ILOSC_X_CENA` | **sprawdź dokument** - wartość pozycji nie wynika z ilości, ceny i rabatów; różnice 0,02-0,05 na wielu pozycjach = **popraw regułę** (np. system zaokrągla cenę po rabacie do 2 miejsc: `miejsca_ceny=2`) |
+| `ILOSC_X_CENA_NARZUT` | oferty i zamówienia z `cena_zakupu_jedn` + `narzut_proc`/`marza_proc`: wariant "cena sprzedaży nie zgadza się z zakup+narzut" = **sprawdź dokument** (`wyjasnienie` mówi, czy pominięto narzut albo rabat, a `narzut_wynikowy` jaki narzut wynika z zapisanej wartości); wariant "narzut/rabat tłumaczy różnicę" (w rozkładzie kodów z dopiskiem `(informacja)`) = **zignoruj** |
 | `NIEZGODNY_Z_BIBLIOTEKA` | **sprawdź dokument**; masowo przy spójnych dokumentach = **popraw regułę** (inny tryb VAT / sposób zaokrąglania rabatu) |
 | `SUMA_POZYCJI_ROZNA_OD_DOKUMENTU` | **sprawdź dokument** - zwykle towarzyszy mu `NAGLOWEK_*` z wyjaśnieniem; sam 1 gr = **popraw regułę** |
 | `SUMA_STAWEK_ROZNA_OD_DOKUMENTU` | **sprawdź dokument** - podsumowanie stawek nie sumuje się do nagłówka |
@@ -524,3 +679,18 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     wyliczone jest podawane w szczegółach przyczyny, ale nie generuje osobnych kodów. Dokument z
     `VAT_WYLICZONY_ZGODNY` ma status `spojny` i nie trafia do JSON/CSV; jeśli ma trafiać (żeby widzieć,
     które dokumenty polegały na wyliczeniu), wystarczy zmienić status na osobny.
+13. **Pozycje z narzutem - heurystyka `cena_netto_jedn`:** gdy pozycja ma zakup i narzut, `cena_netto_jedn` równa
+    cenie zakupu (z tolerancją 0,01) jest traktowana jako cena zakupu, a każda inna jako zapisana cena
+    sprzedaży porównywana z `zakup + narzut`. Jeśli w danych `cena_netto_jedn` to np. cena katalogowa niezwiązana
+    z narzutem, da to fałszywe `ILOSC_X_CENA_NARZUT`; wtedy wystarczy nie mapować tego pola na `cena_netto_jedn`.
+    Narzut bez ceny zakupu jest cicho ignorowany.
+14. **Zaokrąglenie ceny sprzedaży:** do grosza, jednym zaokrągleniem przed rabatem (inaczej niż narzut dokumentu,
+    który zaokrągla do miejsc ceny). Jeśli system źródłowy zaokrągla np. dopiero wartość pozycji, trzeba
+    ustawić `Konfiguracja(miejsca_kwot=...)` albo zmienić regułę.
+15. **Narzut zestawu a sumy dokumentu:** przyjęto, że nagłówek może być sumą liści albo sumą liści z narzutem/rabatem
+    zestawów najwyższego poziomu; zestawy zagnieżdżone z własnym narzutem są oceniane względem swoich liści, a
+    `oblicz()` zawsze liczy sumy z liści. Do potwierdzenia na prawdziwych ZK.
+16. **Dowody `ZESTAW_NIEODSWIEZONY`:** to heurystyka z jednego zrzutu danych (nie widać historii zmian), więc
+    podpowiedź może być fałszywa przy zestawie, który po prostu ma błędną kwotę; `inna` oznacza brak dowodów.
+17. **`BRUTTO_ROWNE_NETTO`:** pomija kwoty, od których VAT zaokrągla się do mniej niż grosza, oraz stawki `zw`/`np`/0;
+    nie rozpoznaje odwróconego obciążenia, w którym brutto równe netto jest zamierzone.

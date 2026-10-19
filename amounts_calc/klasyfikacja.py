@@ -11,6 +11,10 @@ Kody (stałe w bledy.py):
   ZESTAW_LICZONY_PODWOJNIE  nagłówek = suma liści + kwoty pozycji nadrzędnych (zestawów)
   ILOSC_X_CENA              wartość pozycji różni się od ilość x cena po rabacie o więcej niż 0,01
   BRAK_VAT_W_POZYCJACH      pozycje nie mają pola VAT (dane niepełne, nie błąd) - ustawiane przez CLI
+  ILOSC_X_CENA_NARZUT       pozycje z ceną zakupu i narzutem (marżą): wartość pozycji vs ilość x cena sprzedaży
+                            (zakup + narzut, po rabacie). Dwa warianty opisu: "narzut/rabat tłumaczy różnicę"
+                            (informacja: ilość x cena_netto_jedn by się nie zgadzała, a z narzutem się zgadza)
+                            i "cena sprzedaży nie zgadza się z zakup+narzut" (niezgodność)
   VAT_WYLICZONY_ZGODNY      pozycje bez VAT, ale ze stawką i netto: VAT wyliczony biblioteką zgadza się z
                             nagłówkiem (pozycje przestają być "niepełne")
   VAT_WYLICZONY_ROZNY       jw., ale suma wyliczonego VAT różni się od nagłówka (z podpowiedzią, które
@@ -19,11 +23,13 @@ Kody (stałe w bledy.py):
 from decimal import Decimal
 from itertools import combinations
 
-from .bledy import (ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO, POLGROSZ,
+from .bledy import (ILOSC_X_CENA, ILOSC_X_CENA_NARZUT, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO, POLGROSZ,
                     VAT_WYLICZONY_ROZNY, VAT_WYLICZONY_ZGODNY, ZESTAW_LICZONY_PODWOJNIE)
 from .formatowanie import miejsca_znaczace
 
 PROG = Decimal("0.01")
+OPIS_NARZUT_TLUMACZY = "narzut/rabat tłumaczy różnicę"
+OPIS_NARZUT_NIEZGODNA = "cena sprzedaży nie zgadza się z zakup+narzut"
 POLA = ("netto", "vat", "brutto")
 _KOLEJNOSC_GLOWNEGO = ("netto", "brutto", "vat")
 MAX_POZYCJI_W_OPISIE = 5
@@ -150,3 +156,41 @@ def przyczyna_vat_wyliczony(warianty, vat_naglowka, brutto_naglowka, netto_nieza
             "vat_wyliczony": w["vat"], "vat_naglowka": vat_naglowka, "brutto_wyliczone": w["brutto"],
             "brutto_naglowka": brutto_naglowka, "roznica_brutto": brutto_naglowka - w["brutto"],
             "tryb_vat": tv, "wg_stawek": w["wg_stawek"], "stawki_tlumaczace": stawki_tlumaczace(w["wg_stawek"], r)}
+
+
+def przyczyny_ilosc_x_cena_narzut(rekordy):
+    """Sprawdzenie ilość x cena sprzedaży (zakup + narzut, po rabacie) vs zapisana wartość pozycji.
+
+    rekordy: [{indeks, id, zapisane, oczekiwane, cena_oczekiwana, cena_zapisana (lub None), naiwne (lub None),
+    wyjasnienie, narzut_wynikowy}]. Zwraca do dwóch przyczyn ILOSC_X_CENA_NARZUT:
+      - niezgodność (OPIS_NARZUT_NIEZGODNA): zapisana wartość różni się od oczekiwanej o więcej niż 0,01
+        albo zapisana cena sprzedaży różni się od zakup+narzut o więcej niż 0,01;
+      - informacja (OPIS_NARZUT_TLUMACZY, `informacja`: True): wartość się zgadza, choć ilość x cena_netto_jedn
+        (bez narzutu) by się nie zgadzała - narzut/rabat tłumaczy różnicę.
+    """
+    zle, wyjasnione = [], []
+    for r in rekordy:
+        zla_wartosc = abs(r["zapisane"] - r["oczekiwane"]) > PROG
+        zla_cena = r.get("cena_zapisana") is not None and abs(r["cena_zapisana"] - r["cena_oczekiwana"]) > PROG
+        if zla_wartosc or zla_cena:
+            zle.append(r)
+        elif r.get("naiwne") is not None and abs(r["zapisane"] - r["naiwne"]) > PROG:
+            wyjasnione.append(r)
+    wynik = []
+    if zle:
+        gorsza = max(zle, key=lambda r: abs(r["zapisane"] - r["oczekiwane"]))
+        wynik.append({
+            "kod": ILOSC_X_CENA_NARZUT, "opis": OPIS_NARZUT_NIEZGODNA, "pole": "netto", "liczba": len(zle),
+            "roznica": gorsza["zapisane"] - gorsza["oczekiwane"],
+            "pozycje": [{"indeks": r["indeks"], "id": r["id"], "zapisane": r["zapisane"], "oczekiwane": r["oczekiwane"],
+                         "roznica": r["zapisane"] - r["oczekiwane"], "cena_sprzedazy_oczekiwana": r["cena_oczekiwana"],
+                         "cena_sprzedazy_zapisana": r.get("cena_zapisana"), "wyjasnienie": r.get("wyjasnienie"),
+                         "narzut_wynikowy": r.get("narzut_wynikowy")} for r in zle[:MAX_POZYCJI_W_OPISIE]]})
+    if wyjasnione:
+        wynik.append({
+            "kod": ILOSC_X_CENA_NARZUT, "opis": OPIS_NARZUT_TLUMACZY, "pole": "netto", "roznica": None,
+            "informacja": True, "etykieta": ILOSC_X_CENA_NARZUT + " (informacja)", "liczba": len(wyjasnione),
+            "pozycje": [{"indeks": r["indeks"], "id": r["id"], "zapisane": r["zapisane"],
+                         "bez_narzutu": r["naiwne"], "oczekiwane": r["oczekiwane"]}
+                        for r in wyjasnione[:MAX_POZYCJI_W_OPISIE]]})
+    return wynik

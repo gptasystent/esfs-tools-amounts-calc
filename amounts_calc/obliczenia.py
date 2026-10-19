@@ -13,6 +13,11 @@ WARTOŚCI UJEMNE: reguła zaokrąglania działa na module liczby, a znak jest do
 więc dokument ze wszystkimi znakami odwróconymi daje dokładnie odwrócone wyniki (także korekta
 groszowa: "największa" pozycja to ta o największym module, a rozkład "proporcjonalnie" jest lustrzany).
 
+CENA Z ZAKUPU I NARZUTU: pozycja z `cena_zakupu_jedn` i `narzut_proc` (albo `marza_proc`) ma cenę sprzedaży
+`zakup * (1 + narzut/100)` (`zakup / (1 - marża/100)`) zaokrągloną do grosza (konf.kwota); dalej jak zwykła
+cena: rabat pozycji -> cena po rabacie -> wartość. Ma pierwszeństwo przed `cena_netto_jedn` (w ofertach to
+często cena zakupu). Działa w trybie od netto; w trybie od brutto pola zakupu i narzutu są ignorowane.
+
 POZYCJE NADRZĘDNE (ZESTAWY): pozycja z `parent_id` jest dzieckiem pozycji o danym `id`. Pozycja,
 która ma dzieci, to wiersz zbiorczy: jej kwoty to suma dzieci, a sama NIE wchodzi do sum dokumentu
 ani do podsumowania stawek (brak podwójnego liczenia). Jej własne ilość/cena/rabat są ignorowane
@@ -104,7 +109,12 @@ def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf, dopusc_ujemne=False):
     rabat = _rabat(p.rabat_proc, pre + "rabat_proc")
     stawka = normalizuj_stawke(p.stawka_vat, pre + "stawka_vat")
     if tryb == TRYB_NETTO:
-        if p.cena_netto_jedn is not None:
+        if p.cena_zakupu_jedn is not None and (p.narzut_proc is not None or p.marza_proc is not None):
+            # oferta/zamówienie: cena sprzedaży z zakupu i narzutu (marży) pozycji, zaokrąglona do grosza;
+            # ma pierwszeństwo przed cena_netto_jedn, która w takich danych bywa tylko ceną zakupu
+            cena = marza.cena_sprzedazy(p.cena_zakupu_jedn, p.narzut_proc, p.marza_proc, konf, dopusc_ujemne,
+                                        pre.rstrip("."))
+        elif p.cena_netto_jedn is not None:
             cena = do_decimal(p.cena_netto_jedn, pre + "cena_netto_jedn")
         elif p.koszt_zakupu_jedn is not None and (narzut is not None or marza_proc is not None):
             if narzut is not None:

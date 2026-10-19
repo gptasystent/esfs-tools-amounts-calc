@@ -24,18 +24,22 @@ from collections import Counter
 from decimal import Decimal, DecimalException
 
 from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
-from .bledy import (BRAK_CENY, BRAK_POLA, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
+from .bledy import (BRAK_CENY, BRAK_POLA, BRUTTO_ROWNE_NETTO, ZESTAW_NIEODSWIEZONY, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, ILOSC_X_CENA_NARZUT, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
                     NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ, VAT_WYLICZONY_ZGODNY,
-                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
+                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, ZESTAW_ROZNY_OD_DZIECI,
+                    BladWalidacji)
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
 from .hierarchia import zbuduj_hierarchie
 from .formatowanie import miejsca_znaczace
-from .klasyfikacja import (przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
-                           przyczyny_naglowka)
+from .podpowiedzi import PRIORYTET, oznacz_podpowiedzi, podpowiedz_dokumentu
+from .oferty import (delta_zestawow_najwyzszego_poziomu, ma_narzut, przyczyna_zestaw_z_narzutem, rekordy_narzutu,
+                     zestawy_z_narzutem)
+from .klasyfikacja import (PROG, przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
+                           przyczyny_ilosc_x_cena_narzut, przyczyny_naglowka)
 from .model import dokument_z_slownika
 from .obliczenia import oblicz
-from .stawki import do_decimal
+from .stawki import do_decimal, normalizuj_stawke
 from .spojnosc import _wpis, porownaj, sprawdz_spojnosc
 
 DOPASOWANIA = ("oba", "per_stawka", "per_pozycja", "zaden")
@@ -82,8 +86,19 @@ def zbior_typow(typy):
     return frozenset(t.strip().casefold() for t in (typy or ()) if t.strip())
 
 
-ISTOTNE = frozenset({NAGLOWEK_ZERO, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, ILOSC_X_CENA, ZESTAW_LICZONY_PODWOJNIE,
-                     NIEZGODNY_Z_BIBLIOTEKA, VAT_WYLICZONY_ROZNY})
+ISTOTNE = frozenset({NAGLOWEK_ZERO, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, ILOSC_X_CENA, ILOSC_X_CENA_NARZUT,
+                     ZESTAW_LICZONY_PODWOJNIE, NIEZGODNY_Z_BIBLIOTEKA, VAT_WYLICZONY_ROZNY, ZESTAW_NIEODSWIEZONY,
+                     BRUTTO_ROWNE_NETTO})
+
+
+def _istotna(przyczyna):
+    """Przyczyna z ISTOTNE, która nie jest tylko informacją (np. ILOSC_X_CENA_NARZUT: "narzut tłumaczy")."""
+    return przyczyna["kod"] in ISTOTNE and not przyczyna.get("informacja")
+
+
+def etykieta_kodu(przyczyna):
+    """Nazwa kodu w rozkładzie kodów i w CSV (informacyjny wariant kodu ma dopisek)."""
+    return przyczyna.get("etykieta") or przyczyna["kod"]
 
 
 def nazwy_typow(typy):
@@ -104,7 +119,7 @@ def _status(wynik):
     if wynik["blad"]:
         return "blad"
     kody = {p["kod"] for p in wynik["przyczyny"]}
-    if any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or kody & ISTOTNE:
+    if any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or any(_istotna(p) for p in wynik["przyczyny"]):
         return "niespojny"
     if BRAK_VAT_W_POZYCJACH in kody:
         return "niepelny"
@@ -129,16 +144,23 @@ def _rodzaj_danych(pozycje, dzieci):
     return "pelne"
 
 
+def _etykieta_stawki(p):
+    try:
+        return normalizuj_stawke(p["stawka_vat"]) if p.get("stawka_vat") is not None else None
+    except BladWalidacji:
+        return None
+
+
 def _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony):
     """(wiersze, sumy pozycji, źródło) - to, z czego da się porównać nagłówek z pozycjami."""
     if rodzaj == "pelne":
         wiersze = [{"indeks": p.indeks, "id": p.id, "zestaw": p.zestaw, "netto": p.netto, "vat": p.vat,
-                    "brutto": p.brutto} for p in zapisany.pozycje]
+                    "brutto": p.brutto, "stawka": p.stawka_vat} for p in zapisany.pozycje]
         zrodlo = "zapisane"
     elif rodzaj == "brak_vat":
         wiersze = []
         for i, p in enumerate(pozycje):
-            w = {"indeks": i, "id": p.get("id"), "zestaw": i in dzieci, "vat": None}
+            w = {"indeks": i, "id": p.get("id"), "zestaw": i in dzieci, "vat": None, "stawka": _etykieta_stawki(p)}
             for k in ("netto", "brutto"):
                 w[k] = do_decimal(p[k], "pozycje[%d].%s" % (i, k)) if k in p else None
             wiersze.append(w)
@@ -147,7 +169,7 @@ def _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony):
         if obliczony is None:
             return [], None, "obliczone"
         wiersze = [{"indeks": p.indeks, "id": p.id, "zestaw": p.zestaw, "netto": p.netto, "vat": p.vat,
-                    "brutto": p.brutto} for p in obliczony.pozycje]
+                    "brutto": p.brutto, "stawka": p.stawka_vat} for p in obliczony.pozycje]
         zrodlo = "obliczone"
     liscie = [w for w in wiersze if not w["zestaw"]]
     sumy = {k: sum((w[k] for w in liscie), Decimal(0)) if all(w[k] is not None for w in liscie) else None
@@ -182,9 +204,10 @@ def _scal_polgrosze(przyczyny):
 
 
 def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice,
-               wyliczony=None):
-    """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM."""
-    przyczyny = []
+               wyliczony=None, pozycje=(), rabat_dok=0, dopusc_ujemne=False, wstepne=(), dzieci=None):
+    """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM.
+    `wstepne`: przyczyny ustalone wcześniej (np. ZESTAW_Z_NARZUTEM)."""
+    przyczyny = list(wstepne)
     if rodzaj == "brak_vat" and wyliczony is None:
         przyczyny.append({"kod": BRAK_VAT_W_POZYCJACH, "pole": "vat", "roznica": None,
                           "opis": "pozycje nie mają pola VAT ani (wszystkie) stawki - sprawdzono tylko netto "
@@ -198,11 +221,16 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
         przyczyny += przyczyny_naglowka(naglowek, sumy, wiersze, zrodlo)
     if obliczony is not None and rodzaj in ("pelne", "brak_vat"):
         pole = "netto" if zapisany.tryb == "netto" else "brutto"
+        # pozycje z ceną zakupu i narzutem (tylko tryb od netto) mają własne sprawdzenie ILOSC_X_CENA_NARZUT
+        narzutowe = {i for i, p in enumerate(pozycje) if ma_narzut(p)} if pole == "netto" else set()
         porownania = [(w["indeks"], w["id"], w[pole], getattr(obliczony.pozycje[w["indeks"]], pole))
-                      for w in wiersze if not w["zestaw"] and w[pole] is not None]
+                      for w in wiersze if not w["zestaw"] and w[pole] is not None and w["indeks"] not in narzutowe]
         p = przyczyna_ilosc_x_cena(porownania, pole)
         if p:
             przyczyny.append(p)
+        if narzutowe:
+            przyczyny += przyczyny_ilosc_x_cena_narzut(
+                rekordy_narzutu(pozycje, wiersze, obliczony, rabat_dok, dopusc_ujemne))
     # POLGROSZ: z niespójności zapisanych danych i (gdy żaden tryb nie pasuje) z różnic wobec biblioteki
     pary = [(n["oczekiwano"], n["jest"], n["roznica"]) for n in wynik["niespojnosci"]]
     pary_b = [(r["biblioteka"] or Decimal(0), r["zapisane"] or Decimal(0), r["roznica"]) for r in najlepsze_roznice]
@@ -210,10 +238,16 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
     for i in idx:
         if i < len(pary):
             wynik["niespojnosci"][i]["drobiazg"] = True
+    if zrodlo == "zapisane" and dzieci is not None:
+        naglowek_zap = {"netto": zapisany.suma_netto, "vat": zapisany.suma_vat, "brutto": zapisany.suma_brutto}
+        przyczyny += oznacz_podpowiedzi(wynik["niespojnosci"], zapisany, wiersze, dzieci, pozycje, naglowek_zap)
+    else:     # kwoty pozycji nie są zapisane - podpowiedzi o zestawach i brutto nie mają na czym się oprzeć
+        for n in wynik["niespojnosci"]:
+            n["podpowiedz"] = "POLGROSZ" if n.get("drobiazg") else "inna"
     if pg:
         przyczyny.append(pg)
     przyczyny = _scal_polgrosze(przyczyny)
-    istotne = any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or any(c["kod"] in ISTOTNE for c in przyczyny)
+    istotne = any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or any(_istotna(c) for c in przyczyny)
     if dopasowanie_zaden and not istotne:
         reszta = [r for i, r in enumerate(najlepsze_roznice) if len(pary) + i not in idx]
         if reszta:
@@ -221,6 +255,23 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
             przyczyny.append({"kod": NIEZGODNY_Z_BIBLIOTEKA, "pole": najw["pole"], "roznica": najw["roznica"],
                               "opis": "żaden tryb VAT nie odtwarza zapisanych sum"})
     return przyczyny
+
+
+def _uwzglednij_zestawy_w_naglowku(kan, zapisany, zestawy, pozycje):
+    """Jeśli nagłówek = suma liści + różnice wyjaśnionych zestawów (narzut/rabat zestawu wchodzi do sum
+    dokumentu), zwraca dokument z nagłówkiem pomniejszonym o te różnice - wtedy sumy liczone z liści
+    zgadzają się z nagłówkiem. Inaczej zwraca dokument bez zmian. Drugi wynik: czy nagłówek je uwzględnia."""
+    delta = delta_zestawow_najwyzszego_poziomu(zestawy, pozycje)
+    if all(d == 0 for d in delta.values()):
+        return zapisany, False
+    liscie = [p for p in zapisany.pozycje if not p.zestaw]
+    naglowek = {"netto": zapisany.suma_netto, "vat": zapisany.suma_vat, "brutto": zapisany.suma_brutto}
+    suma = {k: sum((getattr(p, k) for p in liscie), Decimal(0)) for k in naglowek}
+    if not all(abs(naglowek[k] - (suma[k] + delta[k])) <= PROG for k in naglowek):
+        return zapisany, False
+    return dokument_z_slownika(dict(kan, suma_netto=naglowek["netto"] - delta["netto"],
+                                    suma_vat=naglowek["vat"] - delta["vat"],
+                                    suma_brutto=naglowek["brutto"] - delta["brutto"])), True
 
 
 def _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne=False):
@@ -252,7 +303,7 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
     wynik = {"indeks": indeks, "id": id_dokumentu(surowy, mapowanie), "typ": typ, "status": None,
              "blad": None, "niespojnosci": [], "przyczyny": [], "dane": None, "pasuje": None,
              "tryb_pasujacy": None, "rozbieznosci": None, "liczba_roznic_pozycji": None,
-             "pominieto_pozycje": False, "max_roznica": Decimal(0)}
+             "pominieto_pozycje": False, "max_roznica": Decimal(0), "podpowiedz": None}
     if typ.casefold() in zbior_typow(pomin_typy):
         wynik["status"] = "pominiety"
         return wynik
@@ -266,7 +317,18 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         wynik["dane"] = rodzaj
         wynik["pominieto_pozycje"] = rodzaj != "pelne"
         zapisany = dokument_z_slownika(dict(kan, pozycje=pozycje if rodzaj == "pelne" else []))
+        przyczyny_zestawow = []
+        if rodzaj == "pelne" and dzieci:
+            # zestaw z własnym narzutem/rabatem może różnić się od sumy dzieci - to informacja, nie błąd
+            wyjasnione = zestawy_z_narzutem(pozycje, zapisany, dzieci)
+            if wyjasnione:
+                zapisany, naglowek_uwzglednia = _uwzglednij_zestawy_w_naglowku(kan, zapisany, wyjasnione, pozycje)
+                przyczyny_zestawow.append(przyczyna_zestaw_z_narzutem(wyjasnione, naglowek_uwzglednia))
         niespojnosci = sprawdz_spojnosc(zapisany, tryb_vat=tryb_vat)
+        if przyczyny_zestawow:
+            objete = {z["indeks"] for z in przyczyny_zestawow[0]["zestawy"]}
+            niespojnosci = [n for n in niespojnosci if not (
+                n["kod"] == ZESTAW_ROZNY_OD_DZIECI and int(n["zakres"].split(":")[1]) in objete)]
         if rodzaj != "pelne":   # bez kwot (i VAT) pozycji zostaje sprawdzenie sum dokumentu
             niespojnosci = [n for n in niespojnosci
                             if n["kod"] == NETTO_PLUS_VAT_ROZNE_OD_BRUTTO and n["zakres"] == "dokument"]
@@ -302,7 +364,8 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         if rodzaj == "brak_kwot":
             wiersze, sumy, zrodlo = _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony)
         wynik["przyczyny"] = _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony,
-                                        wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony)
+                                        wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony, pozycje,
+                                        kan.get("rabat_dokumentu_proc", 0), dopusc_ujemne, przyczyny_zestawow, dzieci)
     except (BladWalidacji, DecimalException) as e:
         wynik["blad"] = _blad_z_wyjatku(e, etap)
 
@@ -310,6 +373,7 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
     kandydaci += [abs(r["roznica"]) for r in najlepsze]
     kandydaci += [abs(c["roznica"]) for c in wynik["przyczyny"] if c.get("roznica") is not None]
     wynik["max_roznica"] = max(kandydaci, default=Decimal(0))
+    wynik["podpowiedz"] = podpowiedz_dokumentu(wynik["niespojnosci"])
     wynik["status"] = _status(wynik)
     return wynik
 
@@ -339,7 +403,7 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typ
     wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin, dopusc_ujemne) for i, d in enumerate(dokumenty)]
     kody = Counter()
     for w in wyniki:
-        kody.update({n["kod"] for n in w["niespojnosci"]} | {c["kod"] for c in w["przyczyny"]})
+        kody.update({n["kod"] for n in w["niespojnosci"]} | {etykieta_kodu(c) for c in w["przyczyny"]})
         if w["blad"]:
             kody[w["blad"]["kod"]] += 1
     porownane = [w for w in wyniki if w["tryb_pasujacy"] is not None]
@@ -355,6 +419,8 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typ
         "z_niespojnosciami": sum(1 for w in wyniki if w["niespojnosci"]),
         "z_bledem": sum(1 for w in wyniki if w["blad"]),
         "z_problemem": sum(1 for w in wyniki if ma_problem(w)),
+        "podpowiedzi": {h: sum(1 for w in wyniki if w["podpowiedz"] == h) for h in PRIORYTET
+                        if any(w["podpowiedz"] == h for w in wyniki)},
         "vat_wyliczony_zgodny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ZGODNY)),
         "vat_wyliczony_rozny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ROZNY)),
         "spojne_z_wyliczonym_vat": sum(1 for w in wyniki
@@ -414,6 +480,9 @@ def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
         "Rozkład kodów (liczba dokumentów):",
     ]
     linie += ["  %-40s %d" % (k, v) for k, v in p["kody"].items()] or ["  (brak)"]
+    if p["podpowiedzi"]:
+        linie += ["", "Podpowiedź przyczyny niespójności (liczba dokumentów): "
+                  + ", ".join("%s=%d" % (h, n) for h, n in p["podpowiedzi"].items())]
     d = p["dopasowanie"]
     linie += [
         "",
@@ -428,7 +497,7 @@ def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
     ostatnie = [wyniki[i] for i in p["najwieksze_indeksy"][:max_przyklady]]
     linie.append("Największe rozbieżności (%d z %d):" % (len(ostatnie), len(p["najwieksze_indeksy"])))
     for n, w in enumerate(ostatnie, 1):
-        kody = sorted({x["kod"] for x in w["niespojnosci"]} | {x["kod"] for x in w["przyczyny"]})
+        kody = sorted({x["kod"] for x in w["niespojnosci"]} | {etykieta_kodu(x) for x in w["przyczyny"]})
         opis = ", ".join(kody) if kody else "zgodność z biblioteką: %s" % w["tryb_pasujacy"]
         linie.append("  %d. id=%s (indeks %d): %s - %s" % (n, w["id"], w["indeks"], _gr(w["max_roznica"]), opis))
     if not ostatnie:
@@ -474,7 +543,7 @@ def zapisz_json(sciezka, obiekt):
         f.write("".join(wynik) + "\n")
 
 
-KOLUMNY_CSV = ("indeks", "id", "typ", "status", "kody", "najwieksza_roznica", "tryb_vat_pasuje")
+KOLUMNY_CSV = ("indeks", "id", "typ", "status", "kody", "najwieksza_roznica", "tryb_vat_pasuje", "podpowiedz")
 
 
 def _komorka_tekstowa(x):
@@ -502,11 +571,11 @@ def zapisz_csv(sciezka, wyniki):
         for w in wyniki:
             if not ma_problem(w):
                 continue
-            kody = sorted({n["kod"] for n in w["niespojnosci"]} | {c["kod"] for c in w["przyczyny"]}
+            kody = sorted({n["kod"] for n in w["niespojnosci"]} | {etykieta_kodu(c) for c in w["przyczyny"]}
                           | ({w["blad"]["kod"]} if w["blad"] else set()))
             zapis.writerow([w["indeks"], _komorka_tekstowa(w["id"]), _komorka_tekstowa(w["typ"]), w["status"],
                             ", ".join(kody), format_kwoty(w["max_roznica"]).replace(".", ","),
-                            w["tryb_pasujacy"] or ""])
+                            w["tryb_pasujacy"] or "", w["podpowiedz"] or ""])
 
 
 def _parser():
