@@ -218,7 +218,7 @@ class TestCheckZestawy(unittest.TestCase):
         from amounts_calc.check import sprawdz_dokument
         w = sprawdz_dokument(dokument_zestaw())
         self.assertEqual((w["status"], w["niespojnosci"], w["blad"]), ("spojny", [], None))
-        self.assertEqual(w["tryb_pasujacy"], "per_stawka")
+        self.assertTrue(w["pasuje"]["per_stawka"])
 
     def test_mapowanie_nazw_pozycji_nadrzednych(self):
         from amounts_calc.adapter import z_wiersza
