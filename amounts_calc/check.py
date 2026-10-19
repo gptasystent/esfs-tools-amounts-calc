@@ -2,7 +2,7 @@
 
     python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
         [--json wynik.json] [--csv wynik.csv] [--max-przyklady N] [--pomin-typy TYP1,TYP2]
-        [--mapowanie mapowanie.json]
+        [--dopusc-ujemne | --nie-dopuszczaj-ujemnych] [--mapowanie mapowanie.json]
 
 Dla każdego dokumentu:
   a) sprawdz_spojnosc na zapisanych danych (niespójność zapisanych sum),
@@ -24,13 +24,15 @@ from collections import Counter
 from decimal import Decimal, DecimalException
 
 from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
-from .bledy import (BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
-                    NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ,
-                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
+from .bledy import (BRAK_CENY, BRAK_POLA, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
+                    NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ, VAT_WYLICZONY_ZGODNY,
+                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
 from .hierarchia import zbuduj_hierarchie
-from .klasyfikacja import przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyny_naglowka
+from .formatowanie import miejsca_znaczace
+from .klasyfikacja import (przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
+                           przyczyny_naglowka)
 from .model import dokument_z_slownika
 from .obliczenia import oblicz
 from .stawki import do_decimal
@@ -81,7 +83,7 @@ def zbior_typow(typy):
 
 
 ISTOTNE = frozenset({NAGLOWEK_ZERO, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, ILOSC_X_CENA, ZESTAW_LICZONY_PODWOJNIE,
-                     NIEZGODNY_Z_BIBLIOTEKA})
+                     NIEZGODNY_Z_BIBLIOTEKA, VAT_WYLICZONY_ROZNY})
 
 
 def nazwy_typow(typy):
@@ -153,13 +155,44 @@ def _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony):
     return wiersze, sumy, zrodlo
 
 
-def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice):
+def _wylicz_vat(pozycje, dzieci, dopusc_ujemne):
+    """VAT i brutto wyliczone biblioteką ze `stawka_vat` i zapisanego `netto` każdej pozycji (w obu trybach VAT).
+
+    Zapisane netto pozycji traktowane jest jako gotowa wartość (bez ponownego rabatu). None, gdy któraś
+    pozycja nie ma stawki - wtedy zostaje BRAK_VAT_W_POZYCJACH."""
+    liscie = [p for i, p in enumerate(pozycje) if i not in dzieci]
+    if not liscie or any(p.get("stawka_vat") is None for p in liscie):
+        return None
+    wejscie = [{"ilosc": 1, "cena_netto_jedn": p["netto"], "stawka_vat": p["stawka_vat"]} for p in liscie]
+    warianty = {}
+    for tv in (VAT_PER_STAWKA, VAT_PER_POZYCJA):
+        d = oblicz(wejscie, tryb="netto", tryb_vat=tv, dopusc_ujemne=dopusc_ujemne)
+        warianty[tv] = {"vat": d.suma_vat, "brutto": d.suma_brutto, "netto": d.suma_netto,
+                        "wg_stawek": [{"stawka": s.stawka_vat, "netto": s.netto, "vat": s.vat}
+                                      for s in d.podsumowanie]}
+    return warianty
+
+
+def _scal_polgrosze(przyczyny):
+    pg = [c for c in przyczyny if c["kod"] == POLGROSZ]
+    if len(pg) < 2:
+        return przyczyny
+    pierwszy = dict(pg[0], roznica=max(c["roznica"] for c in pg), liczba=sum(c.get("liczba", 1) for c in pg))
+    return [pierwszy if c is pg[0] else c for c in przyczyny if c is pg[0] or c["kod"] != POLGROSZ]
+
+
+def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice,
+               wyliczony=None):
     """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM."""
     przyczyny = []
-    if rodzaj == "brak_vat":
+    if rodzaj == "brak_vat" and wyliczony is None:
         przyczyny.append({"kod": BRAK_VAT_W_POZYCJACH, "pole": "vat", "roznica": None,
-                          "opis": "pozycje nie mają pola VAT - sprawdzono tylko netto (i brutto) pozycji z nagłówkiem; "
-                                  "dane niepełne, nie błąd"})
+                          "opis": "pozycje nie mają pola VAT ani (wszystkie) stawki - sprawdzono tylko netto "
+                                  "(i brutto) pozycji z nagłówkiem; dane niepełne, nie błąd"})
+    elif rodzaj == "brak_vat":
+        niezaokraglone = any(w["netto"] is not None and miejsca_znaczace(w["netto"]) > 2
+                             for w in wiersze if not w["zestaw"])
+        przyczyny.append(przyczyna_vat_wyliczony(wyliczony, zapisany.suma_vat, zapisany.suma_brutto, niezaokraglone))
     if sumy is not None:
         naglowek = {"netto": zapisany.suma_netto, "vat": zapisany.suma_vat, "brutto": zapisany.suma_brutto}
         przyczyny += przyczyny_naglowka(naglowek, sumy, wiersze, zrodlo)
@@ -179,6 +212,7 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
             wynik["niespojnosci"][i]["drobiazg"] = True
     if pg:
         przyczyny.append(pg)
+    przyczyny = _scal_polgrosze(przyczyny)
     istotne = any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or any(c["kod"] in ISTOTNE for c in przyczyny)
     if dopasowanie_zaden and not istotne:
         reszta = [r for i, r in enumerate(najlepsze_roznice) if len(pary) + i not in idx]
@@ -189,12 +223,13 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
     return przyczyny
 
 
-def _policz_oba_tryby(kan, zapisany, rodzaj):
+def _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne=False):
     z_stawkami = rodzaj == "pelne" or "podsumowanie" in kan
     obliczone, rozbieznosci, pozycyjne, pasuje = {}, {}, {}, {}
     for tv in (VAT_PER_STAWKA, VAT_PER_POZYCJA):
         obliczone[tv] = oblicz(kan["pozycje"], tryb=kan.get("tryb", "netto"), waluta=kan.get("waluta", "PLN"),
-                               rabat_dokumentu_proc=kan.get("rabat_dokumentu_proc", 0), tryb_vat=tv)
+                               rabat_dokumentu_proc=kan.get("rabat_dokumentu_proc", 0), tryb_vat=tv,
+                               dopusc_ujemne=dopusc_ujemne)
         wszystkie = porownaj(zapisany, obliczone[tv])
         istotne = _kryterium(wszystkie, z_stawkami)
         rozbieznosci[tv] = _opisz_roznice(istotne)
@@ -203,10 +238,13 @@ def _policz_oba_tryby(kan, zapisany, rodzaj):
     return obliczone, rozbieznosci, pozycyjne, pasuje
 
 
-def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
+def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=(),
+                     dopusc_ujemne=False):
     """Sprawdza jeden dokument (słownik o dowolnych nazwach pól + mapowanie). Nie rzuca z powodu danych.
 
     Dokument, którego typ jest w `pomin_typy`, nie jest sprawdzany (status "pominiety").
+    `dopusc_ujemne` dopuszcza ujemne ilości i ceny pozycji; w bibliotece domyślnie False (jak w oblicz()),
+    a CLI włącza je domyślnie, bo w zapisanych dokumentach to normalne (rabat jako linia, korekta, zwrot).
     Wynik: status (spojny / drobiazg / niepelny / niespojny / blad / pominiety), niespojnosci
     (z sprawdz_spojnosc), przyczyny (kody z klasyfikacja.py) i dopasowanie do trybów VAT.
     """
@@ -242,22 +280,29 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         wynik["niespojnosci"] = niespojnosci
 
         etap = "obliczenia"
-        obliczone = None
+        obliczone = wyliczony = None
         try:
-            obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj)
-            wynik.update(pasuje=pasuje, rozbieznosci=rozbieznosci, liczba_roznic_pozycji=pozycyjne,
-                         tryb_pasujacy=_dopasowanie(pasuje[VAT_PER_STAWKA], pasuje[VAT_PER_POZYCJA]))
-            # do "największej rozbieżności" liczy się lepszy z trybów (mniejsza suma różnic)
-            najlepszy = min((VAT_PER_STAWKA, VAT_PER_POZYCJA),
-                            key=lambda t: sum(abs(r["roznica"]) for r in rozbieznosci[t]))
-            najlepsze = rozbieznosci[najlepszy]
+            if rodzaj == "brak_vat":
+                wyliczony = _wylicz_vat(pozycje, dzieci, dopusc_ujemne)
+            try:
+                obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne)
+                wynik.update(pasuje=pasuje, rozbieznosci=rozbieznosci, liczba_roznic_pozycji=pozycyjne,
+                             tryb_pasujacy=_dopasowanie(pasuje[VAT_PER_STAWKA], pasuje[VAT_PER_POZYCJA]))
+                # do "największej rozbieżności" liczy się lepszy z trybów (mniejsza suma różnic)
+                najlepszy = min((VAT_PER_STAWKA, VAT_PER_POZYCJA),
+                                key=lambda t: sum(abs(r["roznica"]) for r in rozbieznosci[t]))
+                najlepsze = rozbieznosci[najlepszy]
+            except BladWalidacji as e:
+                # bez ilości/ceny/stawki w pozycjach bez VAT nie ma czego porównać z biblioteką - zostają sumy
+                if not (rodzaj == "brak_vat" and e.kod in (BRAK_POLA, BRAK_CENY)):
+                    raise
         except (BladWalidacji, DecimalException) as e:
             wynik["blad"] = _blad_z_wyjatku(e, etap)
         obliczony = obliczone[VAT_PER_STAWKA] if obliczone else None
         if rodzaj == "brak_kwot":
             wiersze, sumy, zrodlo = _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony)
         wynik["przyczyny"] = _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony,
-                                        wynik["tryb_pasujacy"] == "zaden", najlepsze)
+                                        wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony)
     except (BladWalidacji, DecimalException) as e:
         wynik["blad"] = _blad_z_wyjatku(e, etap)
 
@@ -274,6 +319,10 @@ def ma_problem(wynik):
     return wynik["status"] not in ("spojny", "pominiety")
 
 
+def _ma_kod(wynik, kod):
+    return any(c["kod"] == kod for c in wynik["przyczyny"])
+
+
 def _wg_typu(wyniki):
     tabela = {}
     for w in wyniki:
@@ -283,11 +332,11 @@ def _wg_typu(wyniki):
     return dict(sorted(tabela.items(), key=lambda kv: (-kv[1]["dokumentow"], kv[0])))
 
 
-def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
+def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=(), dopusc_ujemne=False):
     """Zwraca (lista wyników per dokument, podsumowanie). Błędny dokument nie przerywa partii."""
     scal_mapowanie(mapowanie)  # wczesny błąd przy złym mapowaniu
     pomin = zbior_typow(pomin_typy)
-    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin) for i, d in enumerate(dokumenty)]
+    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin, dopusc_ujemne) for i, d in enumerate(dokumenty)]
     kody = Counter()
     for w in wyniki:
         kody.update({n["kod"] for n in w["niespojnosci"]} | {c["kod"] for c in w["przyczyny"]})
@@ -306,6 +355,10 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typ
         "z_niespojnosciami": sum(1 for w in wyniki if w["niespojnosci"]),
         "z_bledem": sum(1 for w in wyniki if w["blad"]),
         "z_problemem": sum(1 for w in wyniki if ma_problem(w)),
+        "vat_wyliczony_zgodny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ZGODNY)),
+        "vat_wyliczony_rozny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ROZNY)),
+        "spojne_z_wyliczonym_vat": sum(1 for w in wyniki
+                                       if w["status"] == "spojny" and _ma_kod(w, VAT_WYLICZONY_ZGODNY)),
         "wymaga_uwagi": sum(1 for w in wyniki if w["status"] in ("niespojny", "blad")),
         "kody": dict(sorted(kody.items(), key=lambda kv: (-kv[1], kv[0]))),
         "porownanych": len(porownane),
@@ -335,6 +388,8 @@ def _tabela_typow(wg_typu):
 def linie_do_zrobienia(p):
     """Dokładnie 5 linii na początek raportu: co wymaga decyzji, a co można zignorować."""
     s = p["status"]
+    zgodne = (" (w tym VAT wyliczony z pozycji i zgodny z nagłówkiem: %d)" % p["spojne_z_wyliczonym_vat"]
+              if p["spojne_z_wyliczonym_vat"] else "")
     pominiete = ("Pominięte typy (%s): %d" % (", ".join(p["pominiete_typy"]), p["pominiete"])
                  if p["pominiete_typy"] else "Pominięte typy: brak (patrz --pomin-typy)")
     return [
@@ -342,7 +397,7 @@ def linie_do_zrobienia(p):
         "Tylko drobiazgi (POLGROSZ): %d" % s["drobiazg"],
         "Niepełne dane (brak VAT w pozycjach): %d" % s["niepelny"],
         pominiete,
-        "Bez uwag: %d z %d dokumentów" % (s["spojny"], p["liczba_dokumentow"]),
+        "Bez uwag: %d z %d dokumentów%s" % (s["spojny"], p["liczba_dokumentow"], zgodne),
     ]
 
 
@@ -466,6 +521,10 @@ def _parser():
                    help="ile największych rozbieżności pokazać w podsumowaniu (domyślnie 10)")
     p.add_argument("--csv", dest="csv_wyjscie", metavar="WYNIK.csv",
                    help="zapisz dokumenty z problemami jako CSV (separator ';', UTF-8 z BOM - do Excela)")
+    p.add_argument("--dopusc-ujemne", dest="dopusc_ujemne", action="store_true", default=True,
+                   help="dopuszczaj ujemne ilości i ceny pozycji (domyślnie włączone)")
+    p.add_argument("--nie-dopuszczaj-ujemnych", dest="dopusc_ujemne", action="store_false",
+                   help="ujemna ilość/cena pozycji to błąd (ILOSC_UJEMNA / CENA_UJEMNA)")
     p.add_argument("--pomin-typy", dest="pomin_typy", default="", metavar="TYP1,TYP2",
                    help="typy dokumentów do pominięcia, np. KOREKTA,ROZ (wielkość liter bez znaczenia)")
     p.add_argument("--mapowanie", metavar="MAPOWANIE.json",
@@ -486,7 +545,7 @@ def main(argv=None):
         mapowanie = wczytaj_plik_json(args.mapowanie) if args.mapowanie else None
         if not isinstance(dokumenty, list):
             raise ValueError("oczekiwano listy dokumentów (tablicy JSON), jest %s" % type(dokumenty).__name__)
-        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy)
+        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy, args.dopusc_ujemne)
         if args.json_wyjscie:
             zapisz_json(args.json_wyjscie, [wynik_json(w) for w in wyniki if ma_problem(w)])
         if args.csv_wyjscie:

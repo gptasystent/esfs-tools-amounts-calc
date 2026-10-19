@@ -11,11 +11,16 @@ Kody (stałe w bledy.py):
   ZESTAW_LICZONY_PODWOJNIE  nagłówek = suma liści + kwoty pozycji nadrzędnych (zestawów)
   ILOSC_X_CENA              wartość pozycji różni się od ilość x cena po rabacie o więcej niż 0,01
   BRAK_VAT_W_POZYCJACH      pozycje nie mają pola VAT (dane niepełne, nie błąd) - ustawiane przez CLI
+  VAT_WYLICZONY_ZGODNY      pozycje bez VAT, ale ze stawką i netto: VAT wyliczony biblioteką zgadza się z
+                            nagłówkiem (pozycje przestają być "niepełne")
+  VAT_WYLICZONY_ROZNY       jw., ale suma wyliczonego VAT różni się od nagłówka (z podpowiedzią, które
+                            stawki tłumaczą różnicę)
 """
 from decimal import Decimal
+from itertools import combinations
 
 from .bledy import (ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO, POLGROSZ,
-                    ZESTAW_LICZONY_PODWOJNIE)
+                    VAT_WYLICZONY_ROZNY, VAT_WYLICZONY_ZGODNY, ZESTAW_LICZONY_PODWOJNIE)
 from .formatowanie import miejsca_znaczace
 
 PROG = Decimal("0.01")
@@ -100,3 +105,48 @@ def przyczyna_ilosc_x_cena(porownania, pole):
             "roznica": najgorsza[4], "pole": pole, "liczba": len(zle),
             "pozycje": [{"indeks": i, "id": id_, "zapisane": z, "oczekiwane": o, "roznica": r}
                         for i, id_, z, o, r in zle[:MAX_POZYCJI_W_OPISIE]]}
+
+
+def stawki_tlumaczace(wg_stawek, roznica, maks=3):
+    """Zbiory stawek, których łączny VAT równa się modułowi różnicy (z dokładnością do 0,01).
+
+    wg_stawek: [{"stawka", "vat", ...}]. Zwraca do `maks` najmniejszych zbiorów (listy etykiet), np. gdy
+    nagłówek pomija VAT całej stawki 8%: [["8"]]. Stawki z VAT równym 0 nic nie tłumaczą."""
+    szukana = abs(roznica)
+    grupy = [(g["stawka"], g["vat"]) for g in wg_stawek if g["vat"] != 0]
+    wynik = []
+    for rozmiar in range(1, len(grupy) + 1):
+        for podzbior in combinations(grupy, rozmiar):
+            if abs(abs(sum((v for _, v in podzbior), Decimal(0))) - szukana) <= PROG:
+                wynik.append([s for s, _ in podzbior])
+        if wynik:
+            break
+    return wynik[:maks]
+
+
+def przyczyna_vat_wyliczony(warianty, vat_naglowka, brutto_naglowka, netto_niezaokraglone=False):
+    """Porównuje VAT wyliczony z (stawka, netto) pozycji z VAT w nagłówku.
+
+    warianty: {tryb_vat: {"vat", "brutto", "netto", "wg_stawek": [{"stawka", "netto", "vat"}]}} - wyliczone
+    biblioteką w trybach per_stawka i per_pozycja. Zgodność z DOWOLNYM trybem wystarcza.
+    netto_niezaokraglone: któreś zapisane netto ma > 2 miejsca; wtedy różnica <= 0,01 to POLGROSZ.
+    Zwraca przyczynę: VAT_WYLICZONY_ZGODNY, POLGROSZ albo VAT_WYLICZONY_ROZNY (roznica = nagłówek - wyliczony).
+    """
+    zgodne = [tv for tv, w in warianty.items() if w["vat"] == vat_naglowka]
+    if zgodne:
+        w = warianty[zgodne[0]]
+        return {"kod": VAT_WYLICZONY_ZGODNY, "pole": "suma_vat", "roznica": Decimal(0),
+                "opis": "VAT wyliczony ze stawki i netto pozycji zgadza się z nagłówkiem",
+                "vat_wyliczony": w["vat"], "vat_naglowka": vat_naglowka, "brutto_wyliczone": w["brutto"],
+                "brutto_naglowka": brutto_naglowka, "tryby_vat": zgodne, "wg_stawek": w["wg_stawek"]}
+    tv = min(warianty, key=lambda t: abs(vat_naglowka - warianty[t]["vat"]))
+    w = warianty[tv]
+    r = vat_naglowka - w["vat"]
+    if abs(r) <= PROG and netto_niezaokraglone:
+        return {"kod": POLGROSZ, "pole": "suma_vat", "roznica": abs(r), "liczba": 1,
+                "opis": "VAT wyliczony różni się od nagłówka o <= 0,01, a netto pozycji jest niezaokrąglone"}
+    return {"kod": VAT_WYLICZONY_ROZNY, "pole": "suma_vat", "roznica": r,
+            "opis": "suma VAT wyliczonego ze stawek i netto pozycji różni się od VAT w nagłówku",
+            "vat_wyliczony": w["vat"], "vat_naglowka": vat_naglowka, "brutto_wyliczone": w["brutto"],
+            "brutto_naglowka": brutto_naglowka, "roznica_brutto": brutto_naglowka - w["brutto"],
+            "tryb_vat": tv, "wg_stawek": w["wg_stawek"], "stawki_tlumaczace": stawki_tlumaczace(w["wg_stawek"], r)}

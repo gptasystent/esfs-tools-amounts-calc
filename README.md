@@ -43,12 +43,12 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (298 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (369 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
 amounts_calc/
-  config.py       Konfiguracja: JEDNO miejsce reguły zaokrąglania (tryb, miejsca, tryb VAT)
+  config.py       Konfiguracja: JEDNO miejsce reguły zaokrąglania (symetryczne względem zera)
   stawki.py       stawki 23/8/5/0/'zw'/'np', konwersja liczb (float zabroniony)
   model.py        Pozycja (wejście), PozycjaWynik, PodsumowanieStawki, DokumentWynik
   obliczenia.py   oblicz(): od netto / od brutto, rabaty, VAT per pozycja / per stawka
@@ -56,7 +56,7 @@ amounts_calc/
   spojnosc.py     sprawdz_spojnosc(), porownaj()
   adapter.py      z_wiersza(): dowolne nazwy pól -> słownik dokumentu; wczytanie JSON jako Decimal
   check.py        CLI: python -m amounts_calc.check (wsadowe sprawdzanie dokumentów, JSON/CSV)
-  klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA... - przyczyny niespójności (czyste funkcje)
+  klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA, VAT_WYLICZONY_* - przyczyny niespójności (czyste funkcje)
   hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja i liście pod pozycją
   formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
@@ -88,6 +88,14 @@ Punkty zaokrąglania (i tylko one), w kolejności:
 4. rozbicie na netto / vat / brutto -> grosz:
    - od netto: `vat = netto * stawka/100`,
    - od brutto: `netto = brutto / (1 + stawka/100)`, `vat = brutto - netto` (bez dryfu).
+
+**Wartości ujemne.** Zaokrąglanie jest symetryczne względem zera: reguła (domyślnie `ROUND_HALF_UP`)
+działa na module liczby, a znak jest dopisywany po zaokrągleniu, więc `-12,345 -> -12,35` tak samo jak
+`12,345 -> 12,35`, a wynik zerowy nie dostaje znaku. Dokument z odwróconymi znakami ilości daje dokładnie
+odwrócone kwoty w każdym trybie (także korekta groszowa: "największa" pozycja to ta o największym
+module, a rozkład `proporcjonalnie` jest lustrzany). Domyślnie `oblicz()` odrzuca ujemną ilość i cenę
+(`ILOSC_UJEMNA`, `CENA_UJEMNA`); `oblicz(..., dopusc_ujemne=True)` je dopuszcza. Rabat (`rabat_proc`,
+`rabat_dokumentu_proc`) zawsze musi mieścić się w 0..100%; rabat jako osobna linia to linia z ujemną ceną.
 
 **Kolejność rabatów:** rabat pozycji (na cenie jednostkowej), potem rabat dokumentu
 (procentowo na wartości każdej pozycji), na końcu VAT. Rabaty nie są sumowane do jednego procentu
@@ -184,8 +192,19 @@ u siebie do pliku JSON, uruchamiasz CLI lokalnie i oglądasz tylko raport.
 ```
 python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
        [--pomin-typy KOREKTA,ROZ] [--json wynik.json] [--csv wynik.csv]
+       [--dopusc-ujemne | --nie-dopuszczaj-ujemnych]
        [--max-przyklady N] [--mapowanie mapowanie.json]
 ```
+
+**Wartości ujemne - `--dopusc-ujemne` (domyślnie włączone).** W zapisanych dokumentach ujemna ilość
+lub cena pozycji jest normalna: rabat zapisany jako osobna linia, korekta, zwrot, dokument w całości
+ujemny albo o sumie zerowej. Dlatego CLI domyślnie przelicza je jak zwykłe (zaokrąglanie symetryczne,
+patrz "Reguła zaokrąglania") i sprawdza spójność sum, a dokument z ujemnymi liniami nie wypada z raportu
+z błędem `CENA_UJEMNA`. `--nie-dopuszczaj-ujemnych` przywraca ścisłą walidację (ujemna ilość/cena =
+błąd `ILOSC_UJEMNA` / `CENA_UJEMNA`, dokument trafia do raportu jako błędny); ma sens, gdy ujemne wartości
+w sprawdzanej próbce mogą być tylko pomyłką wprowadzania (np. nowe zamówienia sprzedaży, w których nie
+wolno wystawiać zwrotów). W bibliotece (`oblicz`, `sprawdz_dokument`, `sprawdz_partie`) domyślnie jest
+`dopusc_ujemne=False`, żeby nie zmieniać dotychczasowego zachowania; CLI przekazuje `True`.
 
 **Wejście** - JSON: lista dokumentów (UTF-8, BOM dozwolony, końce linii LF lub CRLF). Liczby ułamkowe są
 wczytywane jako `Decimal` (`parse_float=Decimal`, bez przechodzenia przez `float`); liczby mogą też być
@@ -228,7 +247,9 @@ albo `obliczenia`).
 | `NAGLOWEK_NIZSZY` / `NAGLOWEK_WYZSZY` | nagłówek różni się od sumy pozycji o więcej niż 0,01 (porównanie: netto, potem brutto, potem VAT; pokazuje różnicę, różnice na pozostałych polach i `mozliwe_pozycje` - pozycje o wartości równej różnicy, np. pominiętą albo policzoną drugi raz) |
 | `ZESTAW_LICZONY_PODWOJNIE` | nagłówek = suma pozycji "liści" + kwoty pozycji nadrzędnych (zestawów) |
 | `ILOSC_X_CENA` | wartość pozycji (netto w trybie od netto, brutto w trybie od brutto) różni się od `ilość x cena po rabacie` (z rabatem pozycji i dokumentu) o więcej niż 0,01; wskazuje pozycje i różnice |
-| `BRAK_VAT_W_POZYCJACH` | wszystkie pozycje mają `netto`, a żadna pola VAT: **dane niepełne, nie błąd**. Liczone jest, co się da: netto (i brutto, jeśli jest) pozycji vs nagłówek, `ILOSC_X_CENA`, sumy nagłówka |
+| `VAT_WYLICZONY_ZGODNY` | pozycje nie mają pola VAT, ale mają `stawka_vat` i `netto`: VAT i brutto zostały wyliczone biblioteką (zapisane netto traktowane jako gotowa wartość pozycji, w obu trybach VAT) i **suma wyliczonego VAT zgadza się z VAT w nagłówku** (w którymkolwiek trybie; `tryby_vat` mówi w którym). Dokument przestaje być "niepełny" |
+| `VAT_WYLICZONY_ROZNY` | jw., ale suma wyliczonego VAT różni się od nagłówka: `roznica` = nagłówek - wyliczony (dla bliższego trybu), `wg_stawek` (netto i VAT każdej stawki), `stawki_tlumaczace` (najmniejsze zbiory stawek, których VAT równa się różnicy, np. `[["8"]]` - nagłówek pomija VAT stawki 8%) i `roznica_brutto`. Różnica <= 0,01 przy niezaokrąglonym netto to `POLGROSZ` |
+| `BRAK_VAT_W_POZYCJACH` | pozycje nie mają pola VAT **i** brak stawki (w którejś pozycji): **dane niepełne, nie błąd**. Nie da się wyliczyć VAT, więc liczone jest, co się da: netto (i brutto, jeśli jest) pozycji vs nagłówek, `ILOSC_X_CENA`, sumy nagłówka. Brak ilości, ceny lub stawki nie robi z takiego dokumentu błędu |
 | `NIEZGODNY_Z_BIBLIOTEKA` | żaden tryb VAT nie odtwarza zapisanych sum, a nic innego tego nie tłumaczy |
 
 Kody spójności z `sprawdz_spojnosc` (`SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`, `NETTO_PLUS_VAT_ROZNE_OD_BRUTTO`,
@@ -237,10 +258,12 @@ Kody spójności z `sprawdz_spojnosc` (`SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`, `NETTO
 `NIEPOPRAWNA_HIERARCHIA`) trafiają do tego samego rozkładu kodów.
 
 **Status dokumentu** (jeden, wg pierwszeństwa): `blad` > `niespojny` (jest niespójność inna niż POLGROSZ
-albo przyczyna z tabeli poza POLGROSZ i `BRAK_VAT_W_POZYCJACH`) > `niepelny` (tylko
+albo przyczyna z tabeli poza POLGROSZ, `BRAK_VAT_W_POZYCJACH` i `VAT_WYLICZONY_ZGODNY`) > `niepelny` (tylko
 `BRAK_VAT_W_POZYCJACH`) > `drobiazg` (tylko `POLGROSZ`) > `spojny`; `pominiety` dla typów z `--pomin-typy`.
 Dokument z `BRAK_VAT_W_POZYCJACH` i prawdziwą niespójnością jest `niespojny`, a kod braku VAT zostaje
-na liście przyczyn.
+na liście przyczyn. Dokument z `VAT_WYLICZONY_ZGODNY` i bez innych przyczyn jest `spojny` (nie trafia do
+JSON/CSV), ale jest liczony osobno: w 5. linii podsumowania jako "w tym VAT wyliczony z pozycji i zgodny
+z nagłówkiem: N", a kod widać w rozkładzie kodów. `VAT_WYLICZONY_ROZNY` daje `niespojny`.
 
 **Pomijanie typów i grupowanie.** Korekty i faktury rozliczeniowe mają z założenia sumy nagłówka różne od
 sumy pozycji. `--pomin-typy KOREKTA,ROZ` (wielkość liter bez znaczenia) wyłącza je ze sprawdzania w całości
@@ -258,23 +281,24 @@ jeśli są, muszą się zgadzać z sumą dzieci (`ZESTAW_ROZNY_OD_DZIECI`). Zła
 `{"id": "Z1", "ilosc": 1, "stawka_vat": 23}` (wiersz nadrzędny; własna cena i rabat są ignorowane) i dzieci
 `{"parent_id": "Z1", ...}`.
 
-**Przykład** (dane fikcyjne; plik `dokumenty.json`: spójna faktura, faktura z niezaokrąglonym brutto
-`1845.005`, faktura bez pola VAT w pozycjach, trzy faktury z różnymi błędami, korekta, faktura
-rozliczeniowa i ZK z zestawem policzonym drugi raz):
+**Przykład** (dane fikcyjne; plik `dokumenty.json` z 12 dokumentami: spójna faktura, faktura z niezaokrąglonym
+brutto `1845.005`, faktura bez pola VAT w pozycjach ze stawkami (VAT wyliczony i zgodny), faktura bez VAT
+i bez stawek, faktura z rabatem jako linią ujemną, kilka faktur z różnymi błędami (w tym nagłówek bez VAT
+stawki 8%), korekta, faktura rozliczeniowa i ZK z zestawem policzonym drugi raz):
 
 ```
 $ python -m amounts_calc.check dokumenty.json --pomin-typy KOREKTA,ROZ --json problemy.json --csv problemy.csv --max-przyklady 4
-Do sprawdzenia: 4 (niespójne: 4, błędne: 0)
+Do sprawdzenia: 5 (niespójne: 5, błędne: 0)
 Tylko drobiazgi (POLGROSZ): 1
 Niepełne dane (brak VAT w pozycjach): 1
 Pominięte typy (KOREKTA, ROZ): 2
-Bez uwag: 1 z 9 dokumentów
+Bez uwag: 3 z 12 dokumentów (w tym VAT wyliczony z pozycji i zgodny z nagłówkiem: 1)
 
-Sprawdzono dokumentów: 9 (w tym pominięto: 2)
-  spójnych (bez przyczyn):              1
+Sprawdzono dokumentów: 12 (w tym pominięto: 2)
+  spójnych (bez przyczyn):              3
   z niespójnością zapisanych sum:       4
   z błędem (walidacja/struktura):       0
-  w raporcie (JSON/CSV): 6
+  w raporcie (JSON/CSV): 7
 
 Rozkład kodów (liczba dokumentów):
   SUMA_POZYCJI_ROZNA_OD_DOKUMENTU          4
@@ -286,21 +310,23 @@ Rozkład kodów (liczba dokumentów):
   NAGLOWEK_ZERO                            1
   NETTO_PLUS_VAT_ROZNE_OD_BRUTTO           1
   POLGROSZ                                 1
+  VAT_WYLICZONY_ROZNY                      1
+  VAT_WYLICZONY_ZGODNY                     1
   ZESTAW_LICZONY_PODWOJNIE                 1
 
-Zgodność zapisanych sum z biblioteką (dokumenty bez błędu: 7):
-  pasuje per_stawka:  2
-  pasuje per_pozycja: 2
-  rozkład: oba=2, tylko per_stawka=0, tylko per_pozycja=0, żaden=5
+Zgodność zapisanych sum z biblioteką (dokumenty bez błędu: 8):
+  pasuje per_stawka:  3
+  pasuje per_pozycja: 3
+  rozkład: oba=3, tylko per_stawka=0, tylko per_pozycja=0, żaden=5
 
 Wg typu dokumentu:
   typ      dokumentów  spójne  drobiazg  niepełne  niespójne  błędne  pominięte
-  FV                6       1         1         1          3       0          0
+  FV                9       3         1         1          4       0          0
   KOREKTA           1       0         0         0          0       0          1
   ROZ               1       0         0         0          0       0          1
   ZK                1       0         0         0          1       0          0
 
-Największe rozbieżności (4 z 4):
+Największe rozbieżności (4 z 5):
   1. id=ZK/1 (indeks 8): 163.89 (16389 gr) - NAGLOWEK_WYZSZY, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU, ZESTAW_LICZONY_PODWOJNIE
   2. id=FV/4 (indeks 3): 98.40 (9840 gr) - NAGLOWEK_ZERO, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU
   3. id=FV/6 (indeks 5): 36.90 (3690 gr) - ILOSC_X_CENA
@@ -315,6 +341,16 @@ wygląda tak (`mozliwe_pozycje` wskazuje pominiętą pozycję o wartości 10,00)
  "roznice_pol": {"suma_netto": "-10.00", "suma_vat": "-2.30", "suma_brutto": "-12.30"},
  "mozliwe_pozycje": [{"indeks": 1, "id": null, "pole": "netto", "wartosc": "10.00", "zestaw": false}],
  "opis": "nagłówek niższy od sumy pozycji o więcej niż 0,01 (netto)"}
+```
+
+Dokument `FV/8` nie ma VAT w pozycjach, ale ma stawki i netto; nagłówek (VAT 23,00) pomija VAT stawki 8%.
+Biblioteka wylicza z pozycji 25,16 i wskazuje stawkę, która tłumaczy różnicę:
+
+```json
+{"kod": "VAT_WYLICZONY_ROZNY", "roznica": "-2.16", "vat_wyliczony": "25.16", "vat_naglowka": "23.00",
+ "brutto_wyliczone": "152.16", "brutto_naglowka": "150.00", "roznica_brutto": "-2.16", "tryb_vat": "per_stawka",
+ "wg_stawek": [{"stawka": "23", "netto": "100.00", "vat": "23.00"}, {"stawka": "8", "netto": "27.00", "vat": "2.16"}],
+ "stawki_tlumaczace": [["8"]], "pole": "suma_vat", "opis": "..."}
 ```
 
 **Wyjście tekstowe** zaczyna się od dokładnie 5 linii "co jest do zrobienia": ile dokumentów wymaga
@@ -349,12 +385,12 @@ jako formuły.
 ```
 indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje
 1;FV/2;FV;drobiazg;NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, POLGROSZ, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;0,005;zaden
-2;FV/3;FV;niepelny;BRAK_VAT_W_POZYCJACH;0,00;oba
-3;FV/4;FV;niespojny;NAGLOWEK_ZERO, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;98,40;zaden
+9;FV/7;FV;niepelny;BRAK_VAT_W_POZYCJACH;0,00;
+10;FV/8;FV;niespojny;VAT_WYLICZONY_ROZNY;2,16;
 ```
 
 **Kod wyjścia:** 0 - nic nie wymaga uwagi (drobiazgi, dane niepełne i pominięte typy nie liczą się),
-1 - są dokumenty niespójne lub błędne, 2 - błąd wejścia (brak pliku, zły JSON, wejście nie jest listą,
+1 - są dokumenty niespójne lub błędne (przy `--nie-dopuszczaj-ujemnych` także z ujemnymi liniami), 2 - błąd wejścia (brak pliku, zły JSON, wejście nie jest listą,
 złe mapowanie, `NaN` w pliku, błąd zapisu pliku wyjściowego).
 
 **Dopasowanie do dowolnego schematu - `--mapowanie`.** Plik JSON wskazuje, pod jakimi nazwami szukać
@@ -378,6 +414,37 @@ Wynik można podać do `sprawdz_spojnosc`, `porownaj` i `oblicz`.
 Zalecany tryb pracy: eksport próbki (np. ostatni miesiąc) do JSON -> CLI lokalnie z `--pomin-typy` ->
 z pierwszych 5 linii widać, ile jest do zrobienia, z `--csv` pracujesz w Excelu po `status` i `kody`, a `id`
 dokumentów z problemami sprawdzasz już w aplikacji. Raportu z prawdziwymi `id` nie wkładaj do repo.
+
+### Typowe wyniki i co z nimi zrobić
+
+Jedna linia na kod. Zalecenia: **zignoruj** - nic nie trzeba robić; **sprawdź dokument** - otwórz dokument
+(`id` z raportu) i porównaj z podpowiedzią z `przyczyny`; **popraw regułę** - jeśli kod pojawia się masowo
+i z różnicami rzędu groszy, to nie błąd dokumentów, tylko inna reguła zaokrąglania / tryb VAT w systemie
+źródłowym (spróbuj `--tryb-vat`, `Konfiguracja(zaokraglanie=...)`, `miejsca_ceny`).
+
+| Kod | Co zrobić |
+|---|---|
+| `POLGROSZ` | **zignoruj** - różnica <= 0,01 z niezaokrąglonej wartości (np. brutto z 3 miejscami); jeśli takich jest bardzo dużo, popraw zaokrąglanie w miejscu, które zapisuje sumy |
+| `VAT_WYLICZONY_ZGODNY` | **zignoruj** - pozycje bez VAT, ale VAT wyliczony ze stawki i netto zgadza się z nagłówkiem |
+| `VAT_WYLICZONY_ROZNY` | **sprawdź dokument** - zacznij od `stawki_tlumaczace` (nagłówek pomija / dubluje VAT całej stawki); różnica 0,01-0,02 masowo = **popraw regułę** (tryb VAT / zaokrąglanie) |
+| `BRAK_VAT_W_POZYCJACH` | **zignoruj albo uzupełnij eksport** - bez stawki w pozycjach nie da się niczego powiedzieć o VAT, sprawdzone zostało tylko netto |
+| `NAGLOWEK_ZERO` | **sprawdź dokument** - nagłówek nie został przeliczony (sumy 0 przy niezerowych pozycjach); zwykle błąd zapisu, nie zaokrąglenia |
+| `NAGLOWEK_NIZSZY` | **sprawdź dokument** - nagłówek pomija część pozycji; `mozliwe_pozycje` wskazuje pozycję o wartości równej różnicy |
+| `NAGLOWEK_WYZSZY` | **sprawdź dokument** - nagłówek zawiera więcej niż pozycje (pozycja usunięta po przeliczeniu albo policzona dwa razy) |
+| `ZESTAW_LICZONY_PODWOJNIE` | **sprawdź dokument i poprawę w źródle** - suma nagłówka liczy zestaw (pozycję nadrzędną) obok jego dzieci |
+| `ZESTAW_ROZNY_OD_DZIECI` | **sprawdź dokument** - kwota pozycji nadrzędnej nie jest sumą jej dzieci |
+| `ILOSC_X_CENA` | **sprawdź dokument** - wartość pozycji nie wynika z ilości, ceny i rabatów; różnice 0,02-0,05 na wielu pozycjach = **popraw regułę** (np. system zaokrągla cenę po rabacie do 2 miejsc: `miejsca_ceny=2`) |
+| `NIEZGODNY_Z_BIBLIOTEKA` | **sprawdź dokument**; masowo przy spójnych dokumentach = **popraw regułę** (inny tryb VAT / sposób zaokrąglania rabatu) |
+| `SUMA_POZYCJI_ROZNA_OD_DOKUMENTU` | **sprawdź dokument** - zwykle towarzyszy mu `NAGLOWEK_*` z wyjaśnieniem; sam 1 gr = **popraw regułę** |
+| `SUMA_STAWEK_ROZNA_OD_DOKUMENTU` | **sprawdź dokument** - podsumowanie stawek nie sumuje się do nagłówka |
+| `PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI` | **sprawdź dokument** - wiersz podsumowania stawki nie jest sumą jej pozycji |
+| `NETTO_PLUS_VAT_ROZNE_OD_BRUTTO` | **sprawdź dokument**; 1 gr na wielu dokumentach = **popraw regułę** (brutto zaokrąglane osobno od netto i VAT) |
+| `VAT_STAWKI_ROZNY_OD_SUMY` | 1 gr = **popraw regułę**: dokument liczony per pozycja, a sprawdzany `per_stawka` - uruchom z `--tryb-vat per_pozycja`; większa różnica = **sprawdź dokument** |
+| `ILOSC_UJEMNA`, `CENA_UJEMNA` | pojawiają się tylko z `--nie-dopuszczaj-ujemnych`: **zignoruj**, jeśli ujemne linie są normalne (zostaw domyślne `--dopusc-ujemne`), albo **sprawdź dokument**, jeśli nie powinny występować |
+| `BRAK_POLA`, `BRAK_CENY`, `NIEPOPRAWNA_STRUKTURA` | **popraw eksport lub `--mapowanie`** - brak pola (sumy, pozycji, ceny, ilości, stawki) albo zły kształt danych |
+| `NIEZNANA_STAWKA`, `RABAT_POZA_ZAKRESEM`, `NIEPOPRAWNA_LICZBA`, `NIEPOPRAWNY_TRYB`, `NIEPOPRAWNA_WALUTA` | **sprawdź dokument** - dane poza dozwolonymi wartościami (stawka spoza 23/8/5/0/zw/np, rabat poza 0..100%, śmieci zamiast liczby, tryb inny niż netto/brutto, kod waluty nie ISO) |
+| `NIEPOPRAWNA_HIERARCHIA` | **sprawdź dokument** - `parent_id` wskazuje nieistniejącą pozycję, cykl albo zdublowane `id` rodzica |
+| `NARZUT_I_MARZA`, `MARZA_POZA_ZAKRESEM`, `DZIELENIE_PRZEZ_ZERO` | dotyczą tylko API narzutu i marży (`amounts_calc.marza`), nie pojawiają się w raporcie CLI |
 
 ### Integracja z istniejącą aplikacją
 
@@ -429,8 +496,10 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
 3. **Waluty obce:** waluta jest tylko etykietą (3 wielkie litery), bez kursów i bez przeliczeń;
    wszystkie waluty zaokrąglane do 2 miejsc (np. JPY bez groszy wymagałoby osobnej konfiguracji).
    Do rozstrzygnięcia: kto i kiedy przelicza kurs, oraz zaokrąglenie kwot w PLN dla VAT.
-4. **Ujemne ilości/ceny** (korekty, zwroty) są błędem walidacji zgodnie ze specyfikacją;
-   jeśli korekty mają iść tą samą ścieżką, trzeba zmienić regułę.
+4. **Ujemne ilości/ceny** (korekty, zwroty, rabat jako linia): specyfikacja każe je odrzucać, więc
+   `oblicz()` robi to domyślnie (`dopusc_ujemne=False`), a CLI domyślnie je dopuszcza. Do decyzji:
+   czy w aplikacji korekty mają iść tą samą ścieżką `oblicz(..., dopusc_ujemne=True)`; przy mieszanych
+   znakach w jednej stawce "największa pozycja" do korekty groszowej wybierana jest po module.
 5. **Tryb pasujący w raporcie CLI:** zgodność oceniana po sumach dokumentu i podsumowaniu stawek,
    bez pozycji (korekta groszowa może trafić gdzie indziej). Jeśli system źródłowy ma stałą regułę
    rozdziału groszy, można dodać ją jako kolejny wariant porównania.
@@ -450,3 +519,8 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     (separator `,`, kropka dziesiętna) trzeba to zmienić albo użyć JSON.
 11. **Kod wyjścia 1** tylko dla dokumentów niespójnych i błędnych; drobiazgi i dane niepełne dają 0.
     Jeśli CI ma być surowsze, wystarczy sprawdzić statusy w JSON.
+12. **Wyliczanie VAT dla pozycji bez VAT:** zapisane `netto` pozycji jest traktowane jako gotowa wartość
+    (bez ponownego rabatu dokumentu), a porównanie dotyczy sumy VAT dokumentu w obu trybach VAT. Brutto
+    wyliczone jest podawane w szczegółach przyczyny, ale nie generuje osobnych kodów. Dokument z
+    `VAT_WYLICZONY_ZGODNY` ma status `spojny` i nie trafia do JSON/CSV; jeśli ma trafiać (żeby widzieć,
+    które dokumenty polegały na wyliczeniu), wystarczy zmienić status na osobny.
