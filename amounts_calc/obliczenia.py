@@ -16,14 +16,17 @@ rabatem pozycji w jeden procent.
 W trybie per stawka VAT liczony jest raz na sumie stawki, a różnica groszy względem sumy
 VAT liczonych per pozycja trafia do pozycji o największej wartości w tej stawce (remis:
 pierwsza z brzegu). Dzięki temu suma pozycji == suma dokumentu zawsze.
+Opcja rozklad_korekty="proporcjonalnie" zamiast tego liczy część rozbijaną (vat od netto, netto
+od brutto) każdej pozycji dokładnie, obcina ją w dół do grosza i dodaje po 1 gr kolejnym
+pozycjom wg malejącej części ułamkowej (remis: niższy indeks), aż suma stawki się zgodzi.
 """
 from decimal import Decimal, localcontext
 
 from . import marza
 from .bledy import (BRAK_CENY, CENA_UJEMNA, ILOSC_UJEMNA, NARZUT_I_MARZA, NIEPOPRAWNA_WALUTA,
                     NIEPOPRAWNY_TRYB, RABAT_POZA_ZAKRESEM, BladWalidacji)
-from .config import (DOMYSLNA, KONTEKST, TRYB_BRUTTO, TRYB_NETTO, TRYBY, TRYBY_VAT,
-                     VAT_PER_POZYCJA)
+from .config import (DOMYSLNA, KONTEKST, ROZKLADY, ROZKLAD_NAJWIEKSZA, TRYB_BRUTTO, TRYB_NETTO,
+                     TRYBY, TRYBY_VAT, VAT_PER_POZYCJA)
 from .model import (DokumentWynik, PozycjaWynik, pozycja_z_slownika, podsumuj_stawki)
 from .stawki import do_decimal, normalizuj_stawke, wartosc_stawki
 
@@ -52,6 +55,23 @@ def _rozbij(kwota, stawka, tryb, konf):
         return kwota, vat, kwota + vat
     netto = konf.kwota(kwota / (1 + r / _100))
     return netto, kwota - netto, kwota
+
+
+def _dokladna_czesc(kwota, stawka, tryb):
+    """Niezaokrąglona część rozbijana: vat (od netto) albo netto (od brutto)."""
+    r = wartosc_stawki(stawka)
+    return kwota * r / _100 if tryb == TRYB_NETTO else kwota / (1 + r / _100)
+
+
+def _rozdziel_reszty(dokladne, docelowa, konf):
+    """Metoda największych reszt: podłogi do grosza + po 1 gr dla największych części ułamkowych."""
+    podlogi = [konf.podloga(x) for x in dokladne]
+    brak = int(((docelowa - sum(podlogi, Decimal(0))) / konf.grosz).to_integral_value())
+    kolejnosc = sorted(range(len(dokladne)), key=lambda j: (-(dokladne[j] - podlogi[j]), j))
+    wynik = list(podlogi)
+    for k in range(brak):
+        wynik[kolejnosc[k % len(kolejnosc)]] += konf.grosz
+    return wynik
 
 
 def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf):
@@ -85,7 +105,8 @@ def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf):
 
 
 def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
-           narzut_proc=None, marza_proc=None, tryb_vat=None, konfiguracja=DOMYSLNA):
+           narzut_proc=None, marza_proc=None, tryb_vat=None, rozklad_korekty=None,
+           konfiguracja=DOMYSLNA):
     """Przelicza dokument. `pozycje`: lista Pozycja lub słowników. Zwraca DokumentWynik.
 
     Waluta jest tylko etykietą (bez przeliczeń kursowych); zaokrąglanie jak dla PLN.
@@ -96,6 +117,9 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
     tryb_vat = tryb_vat or konf.tryb_vat
     if tryb_vat not in TRYBY_VAT:
         raise BladWalidacji(NIEPOPRAWNY_TRYB, "tryb_vat", "dozwolone: %s, jest %r" % (TRYBY_VAT, tryb_vat))
+    rozklad = rozklad_korekty or konf.rozklad_korekty
+    if rozklad not in ROZKLADY:
+        raise BladWalidacji(NIEPOPRAWNY_TRYB, "rozklad_korekty", "dozwolone: %s, jest %r" % (ROZKLADY, rozklad))
     waluta = _waluta(waluta)
     if narzut_proc is not None and marza_proc is not None:
         raise BladWalidacji(NARZUT_I_MARZA, "narzut_proc", "podaj narzut albo marżę, nie oba")
@@ -133,13 +157,19 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
             rozbieznosc -= roznica
             if tryb_vat == VAT_PER_POZYCJA or roznica == 0:
                 continue
-            # największa wartość w stawce, remis -> najniższy indeks (deterministycznie)
-            najw = max(idx, key=lambda i: (kwoty[i], -i))
-            vat[najw] += roznica
-            if tryb == TRYB_NETTO:
-                brutto[najw] += roznica
+            if rozklad == ROZKLAD_NAJWIEKSZA:
+                # największa wartość w stawce, remis -> najniższy indeks (deterministycznie)
+                najw = max(idx, key=lambda i: (kwoty[i], -i))
+                nowe = {najw: vat[najw] + roznica if tryb == TRYB_NETTO else netto[najw] - roznica}
             else:
-                netto[najw] -= roznica
+                docelowa = _rozbij(sum(kwoty[i] for i in idx), s, tryb, konf)[1 if tryb == TRYB_NETTO else 0]
+                nowe_kol = _rozdziel_reszty([_dokladna_czesc(kwoty[i], s, tryb) for i in idx], docelowa, konf)
+                nowe = dict(zip(idx, nowe_kol))
+            for i, wartosc in nowe.items():
+                if tryb == TRYB_NETTO:      # poprawiamy vat, brutto = netto + vat
+                    vat[i], brutto[i] = wartosc, netto[i] + wartosc
+                else:                       # poprawiamy netto, vat = brutto - netto
+                    netto[i], vat[i] = wartosc, brutto[i] - wartosc
 
         wyniki = tuple(PozycjaWynik(
             indeks=i, ilosc=ilosci[i], cena_po_rabacie=ceny_po[i], rabat_proc=rabaty[i],
