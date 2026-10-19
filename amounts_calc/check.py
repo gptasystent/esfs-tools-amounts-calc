@@ -20,7 +20,7 @@ import uuid
 from collections import Counter
 from decimal import Decimal, DecimalException
 
-from .adapter import id_dokumentu, scal_mapowanie, wczytaj_plik_json, z_wiersza
+from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
 from .bledy import NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, BladWalidacji
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
@@ -29,6 +29,8 @@ from .obliczenia import oblicz
 from .spojnosc import porownaj, sprawdz_spojnosc
 
 DOPASOWANIA = ("oba", "per_stawka", "per_pozycja", "zaden")
+STATUSY = ("spojny", "niespojny", "blad", "pominiety")
+BRAK_TYPU = "(brak typu)"
 _POZYCJA_KLUCZE = ("netto", "vat", "brutto")
 
 
@@ -51,11 +53,39 @@ def _opisz_roznice(roznice):
             for r in roznice]
 
 
-def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None):
-    """Sprawdza jeden dokument (słownik o dowolnych nazwach pól + mapowanie). Nie rzuca z powodu danych."""
-    wynik = {"indeks": indeks, "id": id_dokumentu(surowy, mapowanie), "blad": None, "niespojnosci": [],
-             "pasuje": None, "tryb_pasujacy": None, "rozbieznosci": None, "liczba_roznic_pozycji": None,
-             "pominieto_pozycje": False, "max_roznica": Decimal(0)}
+def nazwa_typu(typ):
+    """Typ dokumentu jako tekst do grupowania (None / puste -> BRAK_TYPU)."""
+    tekst = "" if typ is None else str(typ).strip()
+    return tekst or BRAK_TYPU
+
+
+def zbior_typow(typy):
+    """'KOREKTA, roz' albo lista -> zbiór nazw porównywanych bez względu na wielkość liter."""
+    if isinstance(typy, str):
+        typy = typy.split(",")
+    return frozenset(t.strip().casefold() for t in (typy or ()) if t.strip())
+
+
+def _status(wynik):
+    if wynik["blad"]:
+        return "blad"
+    if wynik["niespojnosci"] or wynik["tryb_pasujacy"] == "zaden":
+        return "niespojny"
+    return "spojny"
+
+
+def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
+    """Sprawdza jeden dokument (słownik o dowolnych nazwach pól + mapowanie). Nie rzuca z powodu danych.
+
+    Dokument, którego typ jest w `pomin_typy`, nie jest sprawdzany (status "pominiety").
+    """
+    typ = nazwa_typu(typ_dokumentu(surowy, mapowanie))
+    wynik = {"indeks": indeks, "id": id_dokumentu(surowy, mapowanie), "typ": typ, "status": None,
+             "blad": None, "niespojnosci": [], "pasuje": None, "tryb_pasujacy": None, "rozbieznosci": None,
+             "liczba_roznic_pozycji": None, "pominieto_pozycje": False, "max_roznica": Decimal(0)}
+    if typ.casefold() in zbior_typow(pomin_typy):
+        wynik["status"] = "pominiety"
+        return wynik
     etap = "wejscie"
     try:
         kan = z_wiersza(surowy, mapowanie)
@@ -94,17 +124,29 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None):
                         key=lambda t: sum(abs(r["roznica"]) for r in wynik["rozbieznosci"][t]))
         kandydaci += [abs(r["roznica"]) for r in wynik["rozbieznosci"][najlepszy]]
     wynik["max_roznica"] = max(kandydaci, default=Decimal(0))
+    wynik["status"] = _status(wynik)
     return wynik
 
 
 def ma_problem(wynik):
-    return bool(wynik["blad"] or wynik["niespojnosci"] or wynik["tryb_pasujacy"] == "zaden")
+    """Czy dokument trafia do raportu (JSON/CSV): wszystko poza spójnymi i pominiętymi."""
+    return wynik["status"] not in ("spojny", "pominiety")
 
 
-def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None):
+def _wg_typu(wyniki):
+    tabela = {}
+    for w in wyniki:
+        wiersz = tabela.setdefault(w["typ"], dict.fromkeys(("dokumentow",) + STATUSY, 0))
+        wiersz["dokumentow"] += 1
+        wiersz[w["status"]] += 1
+    return dict(sorted(tabela.items(), key=lambda kv: (-kv[1]["dokumentow"], kv[0])))
+
+
+def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typy=()):
     """Zwraca (lista wyników per dokument, podsumowanie). Błędny dokument nie przerywa partii."""
     scal_mapowanie(mapowanie)  # wczesny błąd przy złym mapowaniu
-    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie) for i, d in enumerate(dokumenty)]
+    pomin = zbior_typow(pomin_typy)
+    wyniki = [sprawdz_dokument(d, i, tryb_vat, mapowanie, pomin) for i, d in enumerate(dokumenty)]
     kody = Counter()
     for w in wyniki:
         kody.update({n["kod"] for n in w["niespojnosci"]})
@@ -112,10 +154,13 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None):
             kody[w["blad"]["kod"]] += 1
     porownane = [w for w in wyniki if w["tryb_pasujacy"] is not None]
     rozklad = Counter(w["tryb_pasujacy"] for w in porownane)
-    najwieksze = sorted((w for w in wyniki if w["max_roznica"] > 0), key=lambda w: (-w["max_roznica"], w["indeks"]))
+    najwieksze = sorted((w for w in wyniki if w["max_roznica"] > 0 and w["status"] != "pominiety"), key=lambda w: (-w["max_roznica"], w["indeks"]))
     podsumowanie = {
         "liczba_dokumentow": len(wyniki),
-        "spojne": sum(1 for w in wyniki if not w["blad"] and not w["niespojnosci"]),
+        "spojne": sum(1 for w in wyniki if w["status"] == "spojny"),
+        "pominiete": sum(1 for w in wyniki if w["status"] == "pominiety"),
+        "pominiete_typy": sorted(pomin),
+        "wg_typu": _wg_typu(wyniki),
         "z_niespojnosciami": sum(1 for w in wyniki if w["niespojnosci"]),
         "z_bledem": sum(1 for w in wyniki if w["blad"]),
         "z_problemem": sum(1 for w in wyniki if ma_problem(w)),
@@ -133,10 +178,21 @@ def _gr(kwota):
     return "%s (%s gr)" % (format_kwoty(kwota), format_bez_zer(kwota.scaleb(2)))
 
 
+def _tabela_typow(wg_typu):
+    naglowki = ("typ", "dokumentów", "spójne", "niespójne", "błędne", "pominięte")
+    wiersze = [(typ, w["dokumentow"], w["spojny"], w["niespojny"], w["blad"], w["pominiety"])
+               for typ, w in wg_typu.items()]
+    szer = [max(len(str(r[i])) for r in wiersze + [naglowki]) for i in range(len(naglowki))]
+    def linia(r):
+        return "  " + "  ".join(str(c).ljust(szer[0]) if i == 0 else str(c).rjust(szer[i])
+                                for i, c in enumerate(r))
+    return ["Wg typu dokumentu:", linia(naglowki)] + [linia(r) for r in wiersze]
+
+
 def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
     p = podsumowanie
     linie = [
-        "Sprawdzono dokumentów: %d" % p["liczba_dokumentow"],
+        "Sprawdzono dokumentów: %d (w tym pominięto: %d)" % (p["liczba_dokumentow"], p["pominiete"]),
         "  spójnych (bez niespójności i błędów): %d" % p["spojne"],
         "  z niespójnością zapisanych sum:       %d" % p["z_niespojnosciami"],
         "  z błędem (walidacja/struktura):       %d" % p["z_bledem"],
@@ -155,6 +211,7 @@ def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
         % (d["oba"], d["per_stawka"], d["per_pozycja"], d["zaden"]),
         "",
     ]
+    linie += _tabela_typow(p["wg_typu"]) + [""]
     ostatnie = [wyniki[i] for i in p["najwieksze_indeksy"][:max_przyklady]]
     linie.append("Największe rozbieżności (%d z %d):" % (len(ostatnie), len(p["najwieksze_indeksy"])))
     for n, w in enumerate(ostatnie, 1):
@@ -214,6 +271,8 @@ def _parser():
                    help="zapisz listę dokumentów z problemami do pliku JSON")
     p.add_argument("--max-przyklady", type=int, default=10, metavar="N",
                    help="ile największych rozbieżności pokazać w podsumowaniu (domyślnie 10)")
+    p.add_argument("--pomin-typy", dest="pomin_typy", default="", metavar="TYP1,TYP2",
+                   help="typy dokumentów do pominięcia, np. KOREKTA,ROZ (wielkość liter bez znaczenia)")
     p.add_argument("--mapowanie", metavar="MAPOWANIE.json",
                    help="JSON z mapowaniem nazw pól (patrz amounts_calc.adapter)")
     return p
@@ -232,7 +291,7 @@ def main(argv=None):
         mapowanie = wczytaj_plik_json(args.mapowanie) if args.mapowanie else None
         if not isinstance(dokumenty, list):
             raise ValueError("oczekiwano listy dokumentów (tablicy JSON), jest %s" % type(dokumenty).__name__)
-        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie)
+        wyniki, podsumowanie = sprawdz_partie(dokumenty, args.tryb_vat, mapowanie, args.pomin_typy)
         if args.json_wyjscie:
             zapisz_json(args.json_wyjscie, [wynik_json(w) for w in wyniki if ma_problem(w)])
     except (OSError, ValueError, BladWalidacji) as e:  # json.JSONDecodeError i UnicodeDecodeError to ValueError
