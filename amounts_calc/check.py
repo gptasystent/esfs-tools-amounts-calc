@@ -42,7 +42,7 @@ from .oferty import (delta_zestawow_najwyzszego_poziomu, ma_narzut, przyczyna_al
 from .klasyfikacja import (PROG, przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
                            przyczyny_ilosc_x_cena_narzut, przyczyny_naglowka)
 from .model import WYBOR_OPCJI, dokument_z_slownika, ustal_opcje
-from .opcje import przyczyny_opcji
+from .opcje import poza_suma, przyczyny_opcji
 from .obliczenia import oblicz
 from .stawki import do_decimal, normalizuj_stawke
 from .spojnosc import _wpis, porownaj, sprawdz_spojnosc
@@ -372,7 +372,8 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
     wynik = {"indeks": indeks, "id": id_dokumentu(surowy, mapowanie), "typ": typ, "status": None,
              "blad": None, "niespojnosci": [], "przyczyny": [], "dane": None, "pasuje": None,
              "tryb_pasujacy": None, "rozbieznosci": None, "liczba_roznic_pozycji": None,
-             "pominieto_pozycje": False, "max_roznica": Decimal(0), "podpowiedz": None}
+             "pominieto_pozycje": False, "max_roznica": Decimal(0), "podpowiedz": None,
+             "poza_suma": None}
     if typ.casefold() in zbior_typow(pomin_typy):
         wynik["status"] = "pominiety"
         return wynik
@@ -440,6 +441,10 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
                                         wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony, pozycje,
                                         kan.get("rabat_dokumentu_proc", 0), dopusc_ujemne, przyczyny_zestawow, dzieci,
                                         wlaczone, opcje["jawny"])
+        if wiersze:
+            ps = poza_suma(wiersze, dzieci, rozwin(wiersze, dzieci, zapisany.ilosc_zestawu), wlaczone)
+            if ps["pozycje"] or ps["alternatywy_niewybrane"]:
+                wynik["poza_suma"] = ps      # tylko dokumenty z opcjami / niewybranymi alternatywami
     except (BladWalidacji, DecimalException) as e:
         wynik["blad"] = _blad_z_wyjatku(e, etap)
 
@@ -454,9 +459,11 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
 
 def ma_problem(wynik):
     """Czy dokument trafia do raportu (JSON/CSV): wszystko poza spójnymi i pominiętymi oraz dokumenty, w których
-    jest informacja do pokazania w raporcie (przyczyna z `raportuj`, np. ALTERNATYWY_W_SUMIE)."""
+    jest informacja do pokazania w raporcie (przyczyna z `raportuj`, np. ALTERNATYWY_W_SUMIE) albo pozycje
+    opcjonalne spoza sumy (`poza_suma`: opcje lub niewybrane alternatywy)."""
     return (wynik["status"] not in ("spojny", "pominiety")
-            or any(c.get("raportuj") for c in wynik["przyczyny"]))
+            or any(c.get("raportuj") for c in wynik["przyczyny"])
+            or bool(wynik.get("poza_suma")))
 
 
 def _ma_kod(wynik, kod):
@@ -620,7 +627,8 @@ def zapisz_json(sciezka, obiekt):
         f.write("".join(wynik) + "\n")
 
 
-KOLUMNY_CSV = ("indeks", "id", "typ", "status", "kody", "najwieksza_roznica", "tryb_vat_pasuje", "podpowiedz")
+KOLUMNY_CSV = ("indeks", "id", "typ", "status", "kody", "najwieksza_roznica", "tryb_vat_pasuje",
+               "poza_suma_netto", "poza_suma_vat", "poza_suma_brutto", "podpowiedz")
 
 
 def _komorka_tekstowa(x):
@@ -652,7 +660,10 @@ def zapisz_csv(sciezka, wyniki):
                           | ({w["blad"]["kod"]} if w["blad"] else set()))
             zapis.writerow([w["indeks"], _komorka_tekstowa(w["id"]), _komorka_tekstowa(w["typ"]), w["status"],
                             ", ".join(kody), format_kwoty(w["max_roznica"]).replace(".", ","),
-                            w["tryb_pasujacy"] or "", w["podpowiedz"] or ""])
+                            w["tryb_pasujacy"] or ""]
+                           + [format_kwoty(ps[k]).replace(".", ",") if ps and ps[k] is not None else ""
+                              for ps in [w.get("poza_suma")] for k in ("netto", "vat", "brutto")]
+                           + [w["podpowiedz"] or ""])
 
 
 def _parser():

@@ -16,6 +16,7 @@ from .config import KONTEKST
 from .klasyfikacja import PROG
 from .zestawy import POLA, rodzice, sumy_pozycji, wklad
 
+PROGLICZNY = Decimal("0.25")    # reszta dopasowania "najblizsze" względem kwot dodanych opcji
 MAKS_PODZBIOROW_OPCJI = 10   # tyle niewybranych opcji sprawdzamy we wszystkich podzbiorach (reszta: tylko "wszystkie")
 
 
@@ -47,28 +48,45 @@ def _opisz(i, wiersze, dzieci, rozw, wlaczone):
 
 
 def pozycje_opcji(wiersze, rodzic):
-    """(opcje, grupy): indeksy pozycji najwyższego poziomu w trybie "opcja" oraz {grupa: [indeksy]} dla "alternatywa"."""
+    """(opcje, grupy): indeksy pozycji najwyższego poziomu w trybie "opcja" oraz {grupa: [indeksy]} alternatyw (tryb jawny albo awaryjny)."""
     opcje, grupy = [], {}
     for i, w in enumerate(wiersze):
         if i in rodzic:
             continue
         if w.get("tryb_opcji") == "opcja":
             opcje.append(i)
-        elif w.get("tryb_opcji") == "alternatywa":
-            grupy.setdefault(w["alternatywa"], []).append(i)
+        elif w.get("tryb_opcji") == "alternatywa" or (w.get("tryb_opcji") is None and w.get("alternatywa") is not None):
+            grupy.setdefault(w["alternatywa"], []).append(i)       # bez tryb_opcji: tryb awaryjny (alternatywa / grupa_opcji)
     return opcje, dict(sorted(grupy.items(), key=lambda kv: repr(kv[0])))
 
 
-def poza_suma(wiersze, dzieci, rozw, wlaczone):
-    """Suma opcji (tryb "opcja") niewliczonych do sumy dokumentu - do pokazania pod sumą (np. w PDF).
+def _suma_n(kwoty):
+    """Suma kwot; pole bez wartości (None) w którejkolwiek pozycji daje None."""
+    wynik = {f: Decimal(0) for f in POLA}
+    for k in kwoty:
+        for f in POLA:
+            wynik[f] = None if wynik[f] is None or k[f] is None else wynik[f] + k[f]
+    return wynik
 
-    {"netto", "vat", "brutto", "pozycje": [{indeks, id, netto, vat, brutto}]}; zera i pusta lista, gdy brak takich opcji.
-    Niewybrane alternatywy nie są "poza sumą": wykluczają się z wybraną, więc nie ma czego dodawać."""
-    opcje, _ = pozycje_opcji(wiersze, rodzice(dzieci))
+
+def poza_suma(wiersze, dzieci, rozw, wlaczone):
+    """Pozycje opcjonalne niewliczone do sumy dokumentu - do pokazania pod sumą (np. w PDF) i w raporcie CLI.
+
+    {"netto", "vat", "brutto", "pozycje": [{indeks, id, netto, vat, brutto}],
+     "alternatywy_niewybrane": [{indeks, id, grupa, netto, vat, brutto}]}.
+    Kwoty główne to suma niewybranych opcji (tryb "opcja"); zera i pusta lista, gdy takich opcji nie ma (pole bez
+    wartości w pozycjach, np. VAT w dokumencie bez VAT, to None). Niewybrane alternatywy wykluczają się z wybraną,
+    więc nie są dodawane do sumy, tylko wymienione osobno (również w dokumentach trybu awaryjnego, gdzie
+    alternatywą jest pozycja z `alternatywa` / `grupa_opcji` spoza wybranej kombinacji)."""
+    opcje, grupy = pozycje_opcji(wiersze, rodzice(dzieci))
     with localcontext(KONTEKST):
-        poza = [i for i in opcje if i not in wlaczone]
-        pozycje = [dict({"indeks": i, "id": wiersze[i].get("id")}, **_kwoty(i, wiersze, dzieci, rozw)) for i in poza]
-        return dict(_suma(pozycje), pozycje=pozycje)
+        def surowe(i):
+            return wklad(i, wiersze, dzieci, rozw)
+
+        pozycje = [dict({"indeks": i, "id": wiersze[i].get("id")}, **surowe(i)) for i in opcje if i not in wlaczone]
+        alternatywy = [dict({"indeks": i, "id": wiersze[i].get("id"), "grupa": g}, **surowe(i))
+                       for g, idx in grupy.items() for i in idx if i not in wlaczone]
+        return dict(_suma_n(pozycje), pozycje=pozycje, alternatywy_niewybrane=alternatywy)
 
 
 def _pasuje(naglowek, suma, pola):
@@ -91,6 +109,39 @@ def _przyczyna(kod, opis, naglowek, wliczona, pola, **reszta):
                  "roznica_wzgledem_naglowka": roznice, "suma_wliczona": dict(wliczona)}, **reszta)
 
 
+def _odleglosc(naglowek, suma, pola):
+    return sum((abs(naglowek[f] - suma[f]) for f in pola), Decimal(0))
+
+
+def _opcje_w_sumie(wiersze, dzieci, rozw, naglowek, wliczona, pola, niewybrane, wlaczone):
+    """OPCJA_W_SUMIE: najbardziej prawdopodobny podzbiór niewybranych opcji, który nagłówek ma w sumie.
+
+    Dobór po kwotach ZAPISANYCH w pozycjach (netto/vat/brutto pozycji), nie po cenie x narzut: wybierany jest podzbiór,
+    z którym suma jest najbliżej nagłówka (przy remisie mniejszy). `dopasowanie`: "zgodne" - różnica w granicach grosza;
+    "najblizsze" - nagłówek różni się od tej sumy (np. o błąd narzutu, ILOSC_X_CENA_NARZUT), ale jest nią wyraźnie
+    bliżej niż samą sumą wliczoną: reszta nie przekracza 25% kwot dodanych opcji. `reszta` = nagłówek - (suma
+    wliczona + wybrane opcje)."""
+    kandydaci = ([c for r in range(1, len(niewybrane) + 1) for c in combinations(niewybrane, r)]
+                 if len(niewybrane) <= MAKS_PODZBIOROW_OPCJI else [tuple(niewybrane)])
+    wklady = {i: _kwoty(i, wiersze, dzieci, rozw) for i in niewybrane}
+    punktacja = []
+    for c in kandydaci:
+        razem = _suma([wliczona] + [wklady[i] for i in c])
+        punktacja.append((_odleglosc(naglowek, razem, pola), len(c), c, razem))
+    odleglosc, _, c, razem = min(punktacja, key=lambda x: (x[0], x[1]))
+    dodane = _suma(wklady[i] for i in c)
+    zgodne = _pasuje(naglowek, razem, pola)
+    if not zgodne and not (odleglosc < _odleglosc(naglowek, wliczona, pola)
+                           and odleglosc <= PROGLICZNY * sum((abs(dodane[f]) for f in pola), Decimal(0))):
+        return []
+    pozycje = [_opisz(i, wiersze, dzieci, rozw, wlaczone) for i in c]
+    przyczyna = _przyczyna(
+        OPCJA_W_SUMIE, "suma dokumentu zawiera opcje, które nie są wybrane (wybrana != true)",
+        naglowek, wliczona, pola, liczba=len(pozycje), pozycje=pozycje, kwoty_pozycji=dodane,
+        dopasowanie="zgodne" if zgodne else "najblizsze", reszta=_roznice(naglowek, razem, pola))
+    return [przyczyna]
+
+
 def przyczyny_opcji(wiersze, dzieci, rozw, naglowek, wlaczone):
     """Przyczyny OPCJA_W_SUMIE, ALTERNATYWA_BEZ_WYBORU i ALTERNATYWA_WIELE_WYBRANYCH dla dokumentu w trybie jawnym.
 
@@ -109,17 +160,8 @@ def przyczyny_opcji(wiersze, dzieci, rozw, naglowek, wlaczone):
         zgodny = _pasuje(naglowek, wliczona, pola)
 
         niewybrane = [i for i in opcje if i not in wlaczone]
-        if niewybrane and not zgodny:
-            kandydaci = ([c for r in range(1, len(niewybrane) + 1) for c in combinations(niewybrane, r)]
-                         if len(niewybrane) <= MAKS_PODZBIOROW_OPCJI else [tuple(niewybrane)])
-            for c in kandydaci:
-                if _pasuje(naglowek, _suma([wliczona] + [_kwoty(i, wiersze, dzieci, rozw) for i in c]), pola):
-                    pozycje = [_opisz(i, wiersze, dzieci, rozw, wlaczone) for i in c]
-                    wynik.append(_przyczyna(
-                        OPCJA_W_SUMIE, "suma dokumentu zawiera opcje, które nie są wybrane (wybrana != true)",
-                        naglowek, wliczona, pola, liczba=len(pozycje), pozycje=pozycje,
-                        kwoty_pozycji=_suma(_kwoty(i, wiersze, dzieci, rozw) for i in c)))
-                    break
+        if niewybrane and not zgodny and pola:
+            wynik += _opcje_w_sumie(wiersze, dzieci, rozw, naglowek, wliczona, pola, niewybrane, wlaczone)
 
         bez, wiele = [], []
         for g, idx in grupy.items():

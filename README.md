@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (633 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (698 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -62,6 +62,8 @@ amounts_calc/
   hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja, liście pod pozycją, limit głębokości (10)
   zestawy.py      model zestawu z ilością: mnożniki, N x dzieci, podzestawy, alternatywy (czyste funkcje)
   opcje.py        opcje i alternatywy w trybie jawnym: poza_suma, OPCJA_W_SUMIE / ALTERNATYWA_* (czyste funkcje)
+  skan_kodu.py    skaner kodu aplikacji (Python / TS / SQL): miejsca liczące kwoty po swojemu
+  zlote.py        generator "złotych przypadków" (deterministyczny JSON do testu kontraktowego w aplikacji)
   formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
 tests/
@@ -634,6 +636,23 @@ działa jak dotąd) z polami `poza_suma` i `opcje`. `poza_suma` to suma niewlicz
 lista, gdy takich opcji nie ma). Niewybrane alternatywy nie są "poza sumą" - wykluczają się z wybraną. Zestaw wnosi
 `N x dzieci`.
 
+**Raport CLI (`poza_suma`).** Każdy dokument z opcjami `opcja` albo z niewybranymi alternatywami ma w wyniku CLI pole
+`poza_suma` (w JSON; `null` dla pozostałych) i trafia do raportu JSON/CSV nawet wtedy, gdy jest spójny:
+`{"netto", "vat", "brutto", "pozycje": [...], "alternatywy_niewybrane": [{indeks, id, grupa, netto, vat, brutto}]}`.
+Kwoty główne to suma niewybranych opcji (w dokumencie bez VAT w pozycjach `vat` ma wartość `null`), alternatywy są
+wymienione osobno. W CSV są kolumny `poza_suma_netto`, `poza_suma_vat`, `poza_suma_brutto` (przed `podpowiedz`).
+Dotyczy też trybu awaryjnego: niewybrana kombinacja pozycji z `alternatywa` / `grupa_opcji` trafia do
+`alternatywy_niewybrane`.
+
+**Nagłówek z opcją mimo błędu narzutu.** `OPCJA_W_SUMIE` (i `naglowek_zawiera_wszystkie_opcje` w
+`ALTERNATYWY_W_SUMIE`) nie wymaga już dokładnej zgodności: dobierany jest podzbiór niewybranych opcji, z którym
+suma pozycji jest najbliżej nagłówka, liczona z kwot ZAPISANYCH w pozycjach (`netto`/`vat`/`brutto` pozycji), a nie z
+ceny x narzut. Pole `dopasowanie` mówi, jak pewne jest wskazanie: `zgodne` (różnica w granicach grosza) albo `najblizsze`
+(nagłówek różni się od tej sumy, np. o błąd narzutu `ILOSC_X_CENA_NARZUT`, ale jest nią wyraźnie bliżej niż samą sumą
+wliczoną i reszta nie przekracza 25% kwot dodanych opcji); `reszta` to nagłówek - (suma wliczona + wskazane opcje).
+To heurystyka: przy opcji bardzo małej wobec błędu nagłówka może wskazać opcję niesłusznie, a przy większym
+rozjeździe niż 25% nie wskaże nic (zostaje `SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`).
+
 **CLI.** Nic nowego nie jest wymagane. `--tryb-opcji auto|jawny|awaryjny` (domyślnie `auto`: jawny, gdy dokument ma
 pole `tryb_opcji`, inaczej awaryjny); `jawny` wymusza tryb jawny (bez pól wszystko jest `brak`), `awaryjny` ignoruje
 `tryb_opcji` i `wybrana`. Nazwy pól w bazie mapujesz tak jak resztę pól pozycji (`"pozycja": {"tryb_opcji": "rodzaj_linii",
@@ -660,6 +679,101 @@ Ten dokument jest spójny, a `sprawdz_spojnosc(...).poza_suma` to `50.00 / 11.50
 `350.00` (opcja policzona mimo `wybrana=false`), CLI zgłosi `OPCJA_W_SUMIE` (przyczyna z `pozycje` = P2 i
 `roznica_wzgledem_naglowka.netto` = `50.00`), a dla grupy `kolor` bez żadnej wybranej - `ALTERNATYWA_BEZ_WYBORU`
 z `naglowek_pasuje_do` wskazującym pozycję, której dodanie daje sumę nagłówka.
+
+### Złote przypadki (test kontraktowy dla aplikacji)
+
+```
+python -m amounts_calc.zlote --seed 1 --n 500 > zlote.json
+```
+
+Deterministyczny generator (to samo `--seed` i `--n` daje ten sam plik bajt w bajt; przy rosnącym `--n` kolejne
+przypadki są dopisywane na końcu) zestawu kwot z oczekiwanymi wynikami wg zasady aplikacji: **netto do grosza
+(ROUND_HALF_UP, symetrycznie względem zera), VAT = round(netto * stawka / 100, 2) liczony od netto pozycji i zaokrąglany
+per pozycja, brutto = netto + VAT**, stawki `zw`/`np` mają VAT 0. Plik jest samodzielny: wystarczy dowolny parser JSON,
+nie trzeba tej biblioteki (moduł `zlote.py` liczy oczekiwane wartości własnym kodem, bez `oblicz()`, więc test repo
+"generator == `oblicz()`" porównuje dwie niezależne implementacje).
+
+```json
+{"format": "zlote-przypadki/1", "seed": 1, "zasada": "...", "stawki": [23, 8, 5, 0, "zw", "np"],
+ "przypadki": [
+  {"nazwa": "49,50 przy 23% (VAT 11,385 -> 11,39)", "rodzaj": "pozycja", "netto": "49.50", "stawka": 23,
+   "oczekiwane": {"netto": "49.50", "vat": "11.39", "brutto": "60.89"}},
+  {"nazwa": "3 x 0,33 przy 23% (VAT per pozycja 3 x 0,08)", "rodzaj": "suma",
+   "pozycje": [{"netto": "0.33", "stawka": 23}, {"netto": "0.33", "stawka": 23}, {"netto": "0.33", "stawka": 23}],
+   "oczekiwane": {"netto": "0.99", "vat": "0.24", "brutto": "1.23"}},
+  {"nazwa": "3 x 33,33 z rabatem 10%", "rodzaj": "rabat", "ilosc": "3", "cena_netto_jedn": "33.33",
+   "rabat_proc": "10", "stawka": 23, "oczekiwane": {"netto": "89.99", "vat": "20.70", "brutto": "110.69"}}]}
+```
+
+Rodzaje: `pozycja` (`netto` jako tekst, może mieć więcej niż 2 miejsca, np. `12.345`), `rabat` (`netto` pozycji = ilość x cena
+po rabacie, cena zaokrąglona do 4 miejsc, wartość do grosza) i `suma` (lista pozycji; `oczekiwane` to sumy pozycji,
+VAT per pozycja, dlatego w aplikacji porównuj z sumą `kwoty_pozycji`, a nie z VAT liczonym od sumy). Na początku
+zawsze są stałe przypadki graniczne (półgrosze, 1 gr, stawki `zw`/`np`/0, kwota 1234567890123,45, ujemne i zwroty, rabat
+100%), potem losowe: zwykłe, półgroszowe (VAT dokładnie w pół grosza), małe, duże, ujemne, niezaokrąglone, sumy
+(2-30 pozycji, czasem z ujemną) i rabaty. `--n` to liczba przypadków łącznie (przy `--n` mniejszym niż liczba
+granicznych zwracane jest pierwsze `n`). W aplikacji (Python): dla `pozycja` porównaj
+`kwoty_pozycji(Decimal(p["netto"]), p["stawka"])` z `p["oczekiwane"]` jako `Decimal`.
+
+### Skaner kodu aplikacji
+
+```
+python -m amounts_calc.skan_kodu SCIEZKA [SCIEZKA...] [--json w.json] [--csv w.csv]
+       [--zrodlo-prawdy funkcje.txt] [--pomin GLOB]... [--waznosc wysoka|srednia|niska]
+```
+
+Szuka w kodzie aplikacji (Python / Flask, TypeScript i JavaScript / React oraz SQL, w tym zapytania w tekstach Pythona
+i TS) miejsc, które **liczą kwoty po swojemu** zamiast wspólną funkcją `kwoty_pozycji(wartosc_netto, mnoznik_vat) ->
+(netto, vat, brutto)`, i mogą dawać niespójności groszowe. Zasada: VAT od netto pozycji, zaokrąglany per pozycja
+(ROUND_HALF_UP), brutto = netto + VAT. Tylko stdlib; ~3 s na 535 plików Pythona. Kod wyjścia: 0 = brak znalezisk,
+1 = są znaleziska, 2 = błąd wejścia (brak ścieżki, nieczytelny plik `--zrodlo-prawdy`).
+
+| Kod | Ważność | Co wykrywa |
+|---|---|---|
+| `VAT_MNOZENIE_BEZ_ZAOKRAGLENIA` | wysoka | `* 1.23`, `* 1.08`, `* Decimal("1.23")`, `* (1 + vat/100)`, `* (100 + stawka)/100`, `* stawka / 100`, `* 0.23` (też w SQL i w tekstach), gdy w instrukcji nie ma `round`/`quantize`/`kwoty_pozycji`/`ROUND_HALF_*`/`numeric(.,2)` |
+| `JS_ZAOKRAGLENIE_FLOAT` | wysoka / średnia | `Math.round(x * 100) / 100`, `parseFloat(x.toFixed(2))`, `Number(x.toFixed(2))` (wysoka); samo `.toFixed(2)` na kwocie (średnia) |
+| `BRUTTO_VAT_BEZ_WSPOLNEJ_FUNKCJI` | wysoka / średnia | zapis `wartosc_brutto`, `suma_brutto`, `kwota_vat`, `wartosc_vat` (także `wartoscBrutto`, klucze słowników, `kwargs`) wyrażeniem: z `*` `/` `round` (wysoka), z samym `+`/`-` (średnia); w SQL: `UPDATE ... SET`, `INSERT`, `GENERATED ALWAYS AS`, trigger (`NEW.x := ...`). Nie zgłasza: przypisania zmiennej, `sum(...)`, `+=`, akumulacji (`suma = suma + x`), konwersji z wiersza, definicji kolumn ORM |
+| `NETTO_Z_BRUTTO_DZIELENIE` | średnia | `/ 1.23`, `/ (1 + stawka/100)`, `brutto * 100 / 123` (liczenie netto z brutto bez jawnej decyzji) |
+| `ROUND_PYTHON_BANKOWE` | wysoka | `round(kwota, 2)` Pythona na kwocie (zaokrąglenie bankowe, nie ROUND_HALF_UP) |
+| `ROUND_NIEPOPRAWNE_MIEJSCA` | wysoka | `round(kwota)`, `round(kwota, 0/1)`, SQL `ROUND(kwota)` / `ROUND(kwota, 0/1)`, `toFixed(0/1)`, `Math.round(kwota)` |
+| `FLOAT_W_FUNKCJI_KWOTOWEJ` | średnia | `float(...)` na kwocie, `def ...(x: float) -> float` w funkcji o nazwie kwotowej, SQL `float`/`real`/`double precision` w kolumnie kwotowej |
+| `SUMOWANIE_NIESPOJNE` | średnia | w jednym zapytaniu `SUM(...brutto...)` obok `SUM(...netto...)` |
+| `STAWKA_VAT_TEKSTOWA` | niska | `'23%'` (obok słowa vat/stawka), `.replace('%', '')` na stawce |
+| `STAWKA_ZW_NP_POMINIETA` | średnia | `stawka IN (23, 8, 5)` / lista `(23, 8, 5)` bez `zw`/`np`, `NOT IN ('zw','np')`, `stawka != 'zw'`, `stawka > 0`, `int/float/Decimal/parseInt/Number(stawka)` bez jawnej obsługi `zw`/`np` w pobliżu (8 linii) |
+| `FUNKCJA_POZA_ZRODLEM_PRAWDY` | niska | definicja funkcji (Python, TS: `function`, strzałkowa, metoda; SQL `CREATE FUNCTION`) o nazwie z członem brutto/netto/vat/kwota/kwoty/suma/sumy/sumuj, której nie ma w liście źródeł prawdy |
+
+**Jak czytać raport.** Linia: `plik:linia  KOD [ważność]  fragment` (fragment to linia kodu bez nadmiaru spacji, do 160 znaków).
+Znaleziska są pogrupowane w **moduły** = katalog pliku względem skanowanego katalogu (`routes`, `utils`,
+`frontend/pages`, `db/migracje`; pliki w korzeniu to `(korzeń)`), moduły od największej liczby znalezisk, w module od
+najwyższej ważności. Na końcu jest podpowiedź poprawki dla każdego kodu (w JSON/CSV przy każdym znalezisku). JSON ma
+`podsumowanie` (pliki, znaleziska wg ważności, kodu i modułu) i listę `znaleziska`; CSV ma kolumny
+`plik;linia;kod;waznosc;modul;fragment;podpowiedz` (`;`, UTF-8 z BOM, CRLF; fragmenty zaczynające się od `=`, `+`, `@`
+dostają apostrof). Zacznij od **wysokiej** ważności; `FUNKCJA_POZA_ZRODLEM_PRAWDY` to lista funkcji do ręcznego przeglądu
+(część deleguje do wspólnej funkcji - dopisz je do pliku źródeł prawdy).
+
+**Wyłączenia.** Linię wyłącza komentarz `# kwoty-ok: powód` (Python), `// kwoty-ok: powód` (TS) lub `-- kwoty-ok: powód`
+(SQL): w tej samej linii, w osobnej linii bezpośrednio nad nią albo w dowolnej linii wieloliniowej instrukcji (powód jest
+dla ludzi, skaner go nie sprawdza). `--pomin GLOB` (powtarzalne, także po przecinku) pomija pliki i katalogi dopasowane do
+ścieżki względnej lub nazwy (`'tests/*'`, `test_*.py`, `migracje`). Zawsze pomijane: `.git`, `node_modules`,
+`__pycache__`, `venv`/`.venv`, `dist`, `build`, `.next`, `site-packages`, `*.min.js`, `*.d.ts` i pliki większe niż 1,5 MB.
+`--zrodlo-prawdy plik.txt` to lista nazw funkcji dozwolonych (jedna w linii, `#` zaczyna komentarz; domyślnie tylko
+`kwoty_pozycji`, porównanie bez wielkości liter i podkreślników, więc `kwotyPozycji` to to samo): takie funkcje nie są
+zgłaszane jako `FUNKCJA_POZA_ZRODLEM_PRAWDY`, a ich ciała (Python i TS) nie są skanowane, bo to tam wolno liczyć.
+
+**Ograniczenia.** To skaner tekstowy (wyrażenia regularne + prosty lekser komentarzy i tekstów), bez parsowania składni,
+typów i przepływu danych: wskazuje miejsca do przejrzenia, nie dowodzi błędu. Nie wie, czy `x` w `x * 1.23` to kwota
+(dla stałych 1,05/1,08/0,05/0,08 wymaga w linii słowa kwotowego lub vat/stawka, bo bywają zwykłym współczynnikiem);
+nie śledzi, czy wynik mnożenia jest zaokrąglany w innej instrukcji ani czy zmienna `brutto` pochodzi ze wspólnej funkcji.
+Zaokrąglenie gdziekolwiek w tej samej instrukcji (do ~25 linii) zdejmuje `VAT_MNOZENIE_BEZ_ZAOKRAGLENIA`. Nazwy kwotowe
+rozpoznaje po członach identyfikatora (netto, brutto, vat, kwota, cena, suma, wartosc, podatek, amount, price, gross), więc
+kolumny nazwane inaczej (np. `net_amt`) są niewidoczne, a `price` w niekwotowym kontekście daje fałszywy alarm.
+SQL w Pythonie/TS jest rozpoznawany po słowach kluczowych w tekście; SQL składany z kawałków (`"SELECT " + kol`) nie.
+Nie czyta szablonów (`.html`, `.jinja`), plików konfiguracyjnych ani zapytań w ORM-ach (`func.sum(Model.brutto)`).
+Wyrażenia regularne (literały `/.../` w JS) nie są rozpoznawane jako teksty, więc `//` w nich bywa wzięte za komentarz.
+**Dokładność na własnych przykładach** (`tests/skan_przyklady.py`: 74 złe i 61 dobrych fragmentów, fikcyjnych i
+dostrojonych równolegle ze skanerem, więc to dolna granica trudności, nie niezależna miara): 81 trafień, 0 fałszywych
+alarmów, 0 pominięć (precyzja i czułość 100% na tym zbiorze). Dodatkowo 0 znalezisk na ~535 plikach biblioteki standardowej
+Pythona i ~160 plikach JS menedżera pakietów. Na prawdziwym kodzie spodziewaj się szumu głównie z
+`FUNKCJA_POZA_ZRODLEM_PRAWDY`, `FLOAT_W_FUNKCJI_KWOTOWEJ` i `STAWKA_ZW_NP_POMINIETA`.
 
 ### Typowe wyniki i co z nimi zrobić
 
@@ -808,3 +922,10 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     uzupełnić; `--tryb-opcji awaryjny` pozwala porównać oba odczyty.
 21. **Co to jest "poza sumą":** tylko niewybrane *opcje*. Niewybrane alternatywy nie są pokazywane pod sumą; jeśli
     PDF ma pokazywać także je, wystarczy dołożyć drugą sumę (dane są w `wiersze`/`opcje`).
+22. **Skaner kodu: lista źródeł prawdy.** Domyślnie tylko `kwoty_pozycji`. Trzeba dopisać do pliku `--zrodlo-prawdy` nazwy
+    pozostałych funkcji aplikacji, które wolno liczyć kwoty (np. wariant odwrotnego liczenia z brutto), i zdecydować, czy
+    ich ciała mają być wyłączone ze skanowania (tak jest teraz).
+23. **Złote przypadki: odwrotne liczenie i rabaty dokumentu.** Plik zawiera tylko liczenie od netto, rabat pozycji i sumy
+    per pozycja; nie ma przypadków liczenia netto z brutto ani rabatu dokumentu, bo aplikacja nie podała dla nich reguły.
+24. **Opcje: próg 25% dopasowania `najblizsze`** jest wartością dobraną na oko (stała `PROGLICZNY` w `opcje.py`); do
+    potwierdzenia, jak duży błąd narzutu realnie występuje.
