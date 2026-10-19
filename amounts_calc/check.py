@@ -11,7 +11,8 @@ Dla każdego dokumentu:
      legalnie trafić na inną pozycję niż w systemie źródłowym).
 Błędny dokument nie przerywa całości - trafia do raportu z kodem błędu.
 
-Kod wyjścia: 0 = wszystko w porządku, 1 = znaleziono problemy, 2 = błąd wejścia (plik/JSON/mapowanie).
+Kod wyjścia: 0 = nic nie wymaga uwagi (drobiazgi i dane niepełne nie liczą się), 1 = są dokumenty
+niespójne lub błędne, 2 = błąd wejścia (plik/JSON/mapowanie).
 """
 import argparse
 import json
@@ -79,6 +80,19 @@ def zbior_typow(typy):
 
 ISTOTNE = frozenset({NAGLOWEK_ZERO, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, ILOSC_X_CENA, ZESTAW_LICZONY_PODWOJNIE,
                      NIEZGODNY_Z_BIBLIOTEKA})
+
+
+def nazwy_typow(typy):
+    """Nazwy typów tak, jak je wpisano (do wyświetlania), bez powtórzeń z pominięciem wielkości liter."""
+    if isinstance(typy, str):
+        typy = typy.split(",")
+    wynik, widziane = [], set()
+    for t in typy or ():
+        t = t.strip()
+        if t and t.casefold() not in widziane:
+            widziane.add(t.casefold())
+            wynik.append(t)
+    return wynik
 
 
 def _status(wynik):
@@ -279,17 +293,18 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typ
             kody[w["blad"]["kod"]] += 1
     porownane = [w for w in wyniki if w["tryb_pasujacy"] is not None]
     rozklad = Counter(w["tryb_pasujacy"] for w in porownane)
-    najwieksze = sorted((w for w in wyniki if w["max_roznica"] > 0 and w["status"] != "pominiety"), key=lambda w: (-w["max_roznica"], w["indeks"]))
+    najwieksze = sorted((w for w in wyniki if w["max_roznica"] > 0 and w["status"] not in ("pominiety", "drobiazg")), key=lambda w: (-w["max_roznica"], w["indeks"]))
     podsumowanie = {
         "liczba_dokumentow": len(wyniki),
         "spojne": sum(1 for w in wyniki if w["status"] == "spojny"),
         "pominiete": sum(1 for w in wyniki if w["status"] == "pominiety"),
         "status": {s: sum(1 for w in wyniki if w["status"] == s) for s in STATUSY},
-        "pominiete_typy": sorted(pomin),
+        "pominiete_typy": nazwy_typow(pomin_typy),
         "wg_typu": _wg_typu(wyniki),
         "z_niespojnosciami": sum(1 for w in wyniki if w["niespojnosci"]),
         "z_bledem": sum(1 for w in wyniki if w["blad"]),
         "z_problemem": sum(1 for w in wyniki if ma_problem(w)),
+        "wymaga_uwagi": sum(1 for w in wyniki if w["status"] in ("niespojny", "blad")),
         "kody": dict(sorted(kody.items(), key=lambda kv: (-kv[1], kv[0]))),
         "porownanych": len(porownane),
         "dopasowanie": {k: rozklad.get(k, 0) for k in DOPASOWANIA},
@@ -305,9 +320,9 @@ def _gr(kwota):
 
 
 def _tabela_typow(wg_typu):
-    naglowki = ("typ", "dokumentów", "spójne", "niespójne", "błędne", "pominięte")
-    wiersze = [(typ, w["dokumentow"], w["spojny"], w["niespojny"], w["blad"], w["pominiety"])
-               for typ, w in wg_typu.items()]
+    naglowki = ("typ", "dokumentów", "spójne", "drobiazg", "niepełne", "niespójne", "błędne", "pominięte")
+    wiersze = [(typ, w["dokumentow"], w["spojny"], w["drobiazg"], w["niepelny"], w["niespojny"], w["blad"],
+                w["pominiety"]) for typ, w in wg_typu.items()]
     szer = [max(len(str(r[i])) for r in wiersze + [naglowki]) for i in range(len(naglowki))]
     def linia(r):
         return "  " + "  ".join(str(c).ljust(szer[0]) if i == 0 else str(c).rjust(szer[i])
@@ -315,14 +330,29 @@ def _tabela_typow(wg_typu):
     return ["Wg typu dokumentu:", linia(naglowki)] + [linia(r) for r in wiersze]
 
 
+def linie_do_zrobienia(p):
+    """Dokładnie 5 linii na początek raportu: co wymaga decyzji, a co można zignorować."""
+    s = p["status"]
+    pominiete = ("Pominięte typy (%s): %d" % (", ".join(p["pominiete_typy"]), p["pominiete"])
+                 if p["pominiete_typy"] else "Pominięte typy: brak (patrz --pomin-typy)")
+    return [
+        "Do sprawdzenia: %d (niespójne: %d, błędne: %d)" % (p["wymaga_uwagi"], s["niespojny"], s["blad"]),
+        "Tylko drobiazgi (POLGROSZ): %d" % s["drobiazg"],
+        "Niepełne dane (brak VAT w pozycjach): %d" % s["niepelny"],
+        pominiete,
+        "Bez uwag: %d z %d dokumentów" % (s["spojny"], p["liczba_dokumentow"]),
+    ]
+
+
 def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
     p = podsumowanie
-    linie = [
+    linie = linie_do_zrobienia(p) + [
+        "",
         "Sprawdzono dokumentów: %d (w tym pominięto: %d)" % (p["liczba_dokumentow"], p["pominiete"]),
-        "  spójnych (bez niespójności i błędów): %d" % p["spojne"],
+        "  spójnych (bez przyczyn):              %d" % p["spojne"],
         "  z niespójnością zapisanych sum:       %d" % p["z_niespojnosciami"],
         "  z błędem (walidacja/struktura):       %d" % p["z_bledem"],
-        "  z problemem (w tym brak zgodności z biblioteką): %d" % p["z_problemem"],
+        "  w raporcie (JSON/CSV): %d" % p["z_problemem"],
         "",
         "Rozkład kodów (liczba dokumentów):",
     ]
@@ -341,7 +371,7 @@ def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
     ostatnie = [wyniki[i] for i in p["najwieksze_indeksy"][:max_przyklady]]
     linie.append("Największe rozbieżności (%d z %d):" % (len(ostatnie), len(p["najwieksze_indeksy"])))
     for n, w in enumerate(ostatnie, 1):
-        kody = sorted({x["kod"] for x in w["niespojnosci"]})
+        kody = sorted({x["kod"] for x in w["niespojnosci"]} | {x["kod"] for x in w["przyczyny"]})
         opis = ", ".join(kody) if kody else "zgodność z biblioteką: %s" % w["tryb_pasujacy"]
         linie.append("  %d. id=%s (indeks %d): %s - %s" % (n, w["id"], w["indeks"], _gr(w["max_roznica"]), opis))
     if not ostatnie:
@@ -424,7 +454,7 @@ def main(argv=None):
         print("Błąd: %s" % e, file=sys.stderr)
         return 2
     print(tekst_podsumowania(podsumowanie, wyniki, args.max_przyklady))
-    return 1 if podsumowanie["z_problemem"] else 0
+    return 1 if podsumowanie["wymaga_uwagi"] else 0
 
 
 if __name__ == "__main__":

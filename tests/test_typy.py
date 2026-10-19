@@ -40,6 +40,11 @@ class TestTyp(unittest.TestCase):
         self.assertEqual(zbior_typow(None), frozenset())
         self.assertEqual(zbior_typow(""), frozenset())
 
+    def test_nazwy_typow_zachowuja_wielkosc_liter(self):
+        from amounts_calc.check import nazwy_typow
+        self.assertEqual(nazwy_typow("KOREKTA, roz ,korekta,"), ["KOREKTA", "roz"])
+        self.assertEqual(nazwy_typow(None), [])
+
     def test_typ_dokumentu_domyslne_aliasy_i_mapowanie(self):
         self.assertEqual(typ_dokumentu({"typ": "FV"}), "FV")
         self.assertEqual(typ_dokumentu({"rodzaj": "ZK"}), "ZK")
@@ -79,7 +84,7 @@ class TestPominTypy(unittest.TestCase):
                          ["spojny", "pominiety", "pominiety", "pominiety", "niespojny"])
         self.assertEqual(p["liczba_dokumentow"], 5)
         self.assertEqual(p["pominiete"], 3)
-        self.assertEqual(p["pominiete_typy"], ["korekta", "roz"])
+        self.assertEqual(p["pominiete_typy"], ["KOREKTA", "roz"])
         self.assertEqual(p["spojne"], 1)
         self.assertEqual(p["z_problemem"], 1)
         self.assertEqual(p["porownanych"], 2)
@@ -118,9 +123,9 @@ class TestGrupowaniePoTypie(unittest.TestCase):
         t = tekst_podsumowania(p, wyniki)
         self.assertIn("Wg typu dokumentu:", t)
         wiersz_fv = [l for l in t.splitlines() if l.strip().startswith("FV")][0]
-        self.assertEqual(wiersz_fv.split(), ["FV", "3", "2", "1", "0", "0"])
+        self.assertEqual(wiersz_fv.split(), ["FV", "3", "2", "0", "0", "1", "0", "0"])
         wiersz_k = [l for l in t.splitlines() if l.strip().startswith("KOREKTA")][0]
-        self.assertEqual(wiersz_k.split(), ["KOREKTA", "1", "0", "0", "0", "1"])
+        self.assertEqual(wiersz_k.split(), ["KOREKTA", "1", "0", "0", "0", "0", "0", "1"])
         self.assertIn("w tym pominięto: 1", t)
 
 
