@@ -110,6 +110,14 @@ def _przepisz(wiersz, mapowanie_pol):
     return wynik
 
 
+def id_dokumentu(wiersz, mapowanie=None):
+    """Wartość pola 'id' (wg mapowania) bez żadnych zmian albo None; nigdy nie rzuca z powodu danych."""
+    if not isinstance(wiersz, Mapping):
+        return None
+    w = _pobierz(wiersz, scal_mapowanie(mapowanie)["id"])
+    return None if w is _BRAK else w
+
+
 def _lista_wierszy(wartosc, pole):
     if not isinstance(wartosc, (list, tuple)) or not all(isinstance(x, Mapping) for x in wartosc):
         raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, pole, "oczekiwano listy słowników")
