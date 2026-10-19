@@ -1,18 +1,22 @@
 """Pozycje nadrzędne/podrzędne (zestawy): pozycja nadrzędna liczy się z sumy dzieci.
 
 Pozycja z `parent_id` wskazującym `id` innej pozycji jest jej dzieckiem. Pozycja, która ma dzieci,
-jest wierszem zbiorczym (zestawem): jej kwoty to suma kwot liści pod nią i NIE wchodzą do sum
-dokumentu ani do podsumowania stawek (inaczej zestaw byłby liczony podwójnie). Zagnieżdżenie
-dowolnej głębokości jest dozwolone.
+jest wierszem zbiorczym (zestawem): jej kwoty wynikają z dzieci (patrz zestawy.py: dzieci opisują
+JEDNĄ sztukę zestawu, a ilość zestawu mnoży ich sumę) i NIE wchodzą do sum dokumentu ani do podsumowania
+stawek razem z dziećmi (inaczej zestaw byłby liczony podwójnie). Zagnieżdżenie jest dozwolone do
+MAKS_GLEBOKOSC poziomów pod pozycją najwyższego poziomu.
 """
 from .bledy import NIEPOPRAWNA_HIERARCHIA, NIEPOPRAWNA_STRUKTURA, BladWalidacji
 
+MAKS_GLEBOKOSC = 10   # ile poziomów rodziców może mieć pozycja (zestaw > podzestaw > ... > liść)
 
-def zbuduj_hierarchie(pary, pole="pozycje"):
+
+def zbuduj_hierarchie(pary, pole="pozycje", maks_glebokosc=MAKS_GLEBOKOSC):
     """pary: lista (id, parent_id) w kolejności pozycji. Zwraca {indeks_rodzica: [indeksy dzieci]}.
 
     Błędy (NIEPOPRAWNA_HIERARCHIA): nieznany parent_id, parent_id równy własnemu id, cykl,
-    niejednoznaczny rodzic (ten sam id u kilku pozycji, a któraś się do niego odwołuje).
+    niejednoznaczny rodzic (ten sam id u kilku pozycji, a któraś się do niego odwołuje),
+    zagnieżdżenie głębsze niż `maks_glebokosc` poziomów rodziców.
     """
     po_id = {}
     for i, (id_, _) in enumerate(pary):
@@ -45,6 +49,9 @@ def zbuduj_hierarchie(pary, pole="pozycje"):
             if i in widziane:
                 raise BladWalidacji(NIEPOPRAWNA_HIERARCHIA, "%s[%d].parent_id" % (pole, start), "cykl w hierarchii pozycji")
             widziane.add(i)
+            if len(widziane) - 1 > maks_glebokosc:
+                raise BladWalidacji(NIEPOPRAWNA_HIERARCHIA, "%s[%d].parent_id" % (pole, start),
+                                    "zagnieżdżenie głębsze niż %d poziomów" % maks_glebokosc)
     dzieci = {}
     for i, r in rodzic.items():
         dzieci.setdefault(r, []).append(i)

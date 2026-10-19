@@ -38,12 +38,13 @@ pozycjom wg malejącej części ułamkowej (remis: niższy indeks), aż suma sta
 from decimal import Decimal, localcontext
 
 from . import marza
-from .hierarchia import liscie_pod, zbuduj_hierarchie
+from .hierarchia import zbuduj_hierarchie
+from .zestawy import podsumowanie_stawek, rodzice, rozwin
 from .bledy import (BRAK_CENY, CENA_UJEMNA, ILOSC_UJEMNA, NARZUT_I_MARZA, NIEPOPRAWNA_WALUTA,
                     NIEPOPRAWNY_TRYB, RABAT_POZA_ZAKRESEM, BladWalidacji)
 from .config import (DOMYSLNA, KONTEKST, ROZKLADY, ROZKLAD_NAJWIEKSZA, TRYB_BRUTTO, TRYB_NETTO,
                      TRYBY, TRYBY_VAT, VAT_PER_POZYCJA)
-from .model import (DokumentWynik, PozycjaWynik, pozycja_z_slownika, podsumuj_stawki)
+from .model import (DokumentWynik, PodsumowanieStawki, PozycjaWynik, grupa_alternatywy, pozycja_z_slownika)
 from .stawki import do_decimal, normalizuj_stawke, wartosc_stawki
 
 _100 = Decimal(100)
@@ -137,11 +138,17 @@ def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf, dopusc_ujemne=False):
 
 def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
            narzut_proc=None, marza_proc=None, tryb_vat=None, rozklad_korekty=None,
-           dopusc_ujemne=False, konfiguracja=DOMYSLNA):
+           dopusc_ujemne=False, ilosc_zestawu=False, wlaczone_alternatywy=None, konfiguracja=DOMYSLNA):
     """Przelicza dokument. `pozycje`: lista Pozycja lub słowników. Zwraca DokumentWynik.
 
     `dopusc_ujemne=True` dopuszcza ujemne ilości i ceny (rabat jako osobna linia, korekta, zwrot);
     domyślnie są błędem walidacji. Zaokrąglanie i rozbicie VAT są symetryczne względem zera.
+
+    `ilosc_zestawu=True`: ilość pozycji nadrzędnej (zestawu) mnoży sumę jej dzieci - dzieci opisują 1 szt.
+    zestawu (ich wiersze w wyniku są na 1 szt.), zestaw ma wartość N x dzieci, a do sum dokumentu wchodzi
+    N x dzieci (dzieci nie są liczone drugi raz). Domyślnie False: ilość zestawu jest ignorowana.
+    `wlaczone_alternatywy`: które pozycje z `alternatywa` / `grupa_opcji` wchodzą do sum - None (żadna),
+    "wszystkie" albo kolekcja indeksów pozycji; bez takich pól nic się nie zmienia.
 
     Waluta jest tylko etykietą (bez przeliczeń kursowych); zaokrąglanie jak dla PLN.
     """
@@ -164,7 +171,27 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
         rabat_dok = _rabat(rabat_dokumentu_proc, "rabat_dokumentu_proc")
         wejscia = [pozycja_z_slownika(p) for p in pozycje]
         dzieci = zbuduj_hierarchie([(w.id, w.parent_id) for w in wejscia])
-        liscie = [i for i in range(len(wejscia)) if i not in dzieci]  # tylko liście wchodzą do sum
+        liscie = [i for i in range(len(wejscia)) if i not in dzieci]  # liście liczone są na 1 szt. zestawu
+        rodzic = rodzice(dzieci)
+        alt = {i: (grupa_alternatywy(w.alternatywa, w.grupa_opcji) if i not in rodzic else None)
+               for i, w in enumerate(wejscia)}
+        if wlaczone_alternatywy is None:
+            wlaczone = frozenset()
+        elif wlaczone_alternatywy == "wszystkie":
+            wlaczone = frozenset(i for i, g in alt.items() if g is not None)
+        else:
+            wlaczone = frozenset(int(i) for i in wlaczone_alternatywy)
+        ilosci_zestawow = {i: do_decimal(wejscia[i].ilosc, "pozycje[%d].ilosc" % i) for i in dzieci}
+
+        def waga(i):
+            """Ile razy liść wchodzi do sum dokumentu: iloczyn ilości zestawów nad nim, 0 dla opcji spoza wyboru."""
+            m, a, gora = Decimal(1), rodzic.get(i), i
+            while a is not None:
+                m *= ilosci_zestawow[a] if ilosc_zestawu else 1
+                gora, a = a, rodzic.get(a)
+            return Decimal(0) if alt[gora] is not None and gora not in wlaczone else m
+
+        wagi = [waga(i) for i in liscie]
 
         ilosci, ceny_po, rabaty, stawki, kwoty = [], [], [], [], []
         for i in liscie:
@@ -188,20 +215,31 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
 
         rozbieznosc = Decimal(0)
         for s in sorted(set(stawki)):
-            idx = [i for i, x in enumerate(stawki) if x == s]
-            _, vat_grupy, _ = _rozbij(sum(kwoty[i] for i in idx), s, tryb, konf)
-            roznica = vat_grupy - sum(vat[i] for i in idx)
+            # liczą się tylko liście wchodzące do sum; sumy grupy ważone ilością zestawów nad liściem
+            idx = [i for i, x in enumerate(stawki) if x == s and wagi[i] != 0]
+            if not idx:
+                continue
+            suma_kwot = sum((wagi[i] * kwoty[i] for i in idx), Decimal(0))
+            cel_vat = _rozbij(suma_kwot, s, tryb, konf)
+            roznica = cel_vat[1] - sum((wagi[i] * vat[i] for i in idx), Decimal(0))
             rozbieznosc -= roznica
             if tryb_vat == VAT_PER_POZYCJA or roznica == 0:
                 continue
+            # korektę groszową przyjmuje tylko liść o wadze 1 (korekty nie da się rozdzielić na N sztuk zestawu)
+            kandydaci = [i for i in idx if wagi[i] == 1]
+            if not kandydaci:
+                continue
             if rozklad == ROZKLAD_NAJWIEKSZA:
                 # największa wartość w stawce, remis -> najniższy indeks (deterministycznie)
-                najw = max(idx, key=lambda i: (abs(kwoty[i]), -i))
+                najw = max(kandydaci, key=lambda i: (abs(kwoty[i]), -i))
                 nowe = {najw: vat[najw] + roznica if tryb == TRYB_NETTO else netto[najw] - roznica}
             else:
-                docelowa = _rozbij(sum(kwoty[i] for i in idx), s, tryb, konf)[1 if tryb == TRYB_NETTO else 0]
-                nowe_kol = _rozdziel_reszty([_dokladna_czesc(kwoty[i], s, tryb) for i in idx], docelowa, konf)
-                nowe = dict(zip(idx, nowe_kol))
+                docelowa = cel_vat[1 if tryb == TRYB_NETTO else 0]
+                stala = sum((wagi[i] * (vat[i] if tryb == TRYB_NETTO else netto[i]) for i in idx if wagi[i] != 1),
+                            Decimal(0))
+                nowe_kol = _rozdziel_reszty([_dokladna_czesc(kwoty[i], s, tryb) for i in kandydaci],
+                                            docelowa - stala, konf)
+                nowe = dict(zip(kandydaci, nowe_kol))
             for i, wartosc in nowe.items():
                 if tryb == TRYB_NETTO:      # poprawiamy vat, brutto = netto + vat
                     vat[i], brutto[i] = wartosc, netto[i] + wartosc
@@ -213,24 +251,38 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
             w = wejscia[i]
             wyniki_lisci[i] = PozycjaWynik(
                 indeks=i, ilosc=ilosci[j], cena_po_rabacie=ceny_po[j], rabat_proc=rabaty[j],
-                stawka_vat=stawki[j], netto=netto[j], vat=vat[j], brutto=brutto[j], id=w.id, parent_id=w.parent_id)
+                stawka_vat=stawki[j], netto=netto[j], vat=vat[j], brutto=brutto[j], id=w.id, parent_id=w.parent_id,
+                alternatywa=alt[i])
+        # pozycje nadrzędne (zestawy): N x suma dzieci (dzieci na 1 szt.), rekurencyjnie; dla N = 1 zwykła suma
+        wiersze = []
+        for i, w in enumerate(wejscia):
+            if i in wyniki_lisci:
+                r = wyniki_lisci[i]
+                wiersze.append({"indeks": i, "id": r.id, "ilosc": r.ilosc, "netto": r.netto, "vat": r.vat,
+                                "brutto": r.brutto, "stawka": r.stawka_vat, "zestaw": False, "alternatywa": alt[i]})
+            else:
+                wiersze.append({"indeks": i, "id": w.id, "ilosc": ilosci_zestawow[i], "netto": None, "vat": None,
+                                "brutto": None, "stawka": None, "zestaw": True, "alternatywa": alt[i]})
+        rozw = rozwin(wiersze, dzieci, ilosc_zestawu, konf)
         wyniki = []
         for i, w in enumerate(wejscia):
             if i in wyniki_lisci:
                 wyniki.append(wyniki_lisci[i])
                 continue
-            # pozycja nadrzędna (zestaw): suma liści pod nią; nie wchodzi do sum dokumentu
-            potomne = [wyniki_lisci[j] for j in liscie_pod(i, dzieci)]
+            o = rozw["oczekiwane"][i]
             wyniki.append(PozycjaWynik(
-                indeks=i, ilosc=do_decimal(w.ilosc, "pozycje[%d].ilosc" % i), cena_po_rabacie=Decimal(0),
+                indeks=i, ilosc=ilosci_zestawow[i], cena_po_rabacie=Decimal(0),
                 rabat_proc=Decimal(0), stawka_vat=normalizuj_stawke(w.stawka_vat, "pozycje[%d].stawka_vat" % i),
-                netto=sum((x.netto for x in potomne), Decimal(0)), vat=sum((x.vat for x in potomne), Decimal(0)),
-                brutto=sum((x.brutto for x in potomne), Decimal(0)), id=w.id, parent_id=w.parent_id, zestaw=True))
+                netto=o["netto"], vat=o["vat"], brutto=o["brutto"], id=w.id, parent_id=w.parent_id, zestaw=True,
+                alternatywa=alt[i]))
         wyniki = tuple(wyniki)
-        podsumowanie = podsumuj_stawki(wyniki)
+        sumy_stawek = podsumowanie_stawek(wiersze, dzieci, rozw, wlaczone, konf)
+        podsumowanie = tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"]) for s, v in sumy_stawek.items())
         return DokumentWynik(
             waluta=waluta, tryb=tryb, tryb_vat=tryb_vat, pozycje=wyniki, podsumowanie=podsumowanie,
             suma_netto=sum((p.netto for p in podsumowanie), Decimal(0)),
             suma_vat=sum((p.vat for p in podsumowanie), Decimal(0)),
             suma_brutto=sum((p.brutto for p in podsumowanie), Decimal(0)),
-            rozbieznosc_vat=rozbieznosc)
+            rozbieznosc_vat=rozbieznosc, ilosc_zestawu=bool(ilosc_zestawu),
+            wlaczone_alternatywy=tuple(sorted(wlaczone)),
+            alternatywy="wybrane" if any(g is not None for g in alt.values()) else "brak")
