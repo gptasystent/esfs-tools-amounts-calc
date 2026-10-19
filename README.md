@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (583 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (633 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -61,6 +61,7 @@ amounts_calc/
   podpowiedzi.py  ZESTAW_NIEODSWIEZONY / BRUTTO_ROWNE_NETTO / inna - podpowiedź dla każdej niespójności
   hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja, liście pod pozycją, limit głębokości (10)
   zestawy.py      model zestawu z ilością: mnożniki, N x dzieci, podzestawy, alternatywy (czyste funkcje)
+  opcje.py        opcje i alternatywy w trybie jawnym: poza_suma, OPCJA_W_SUMIE / ALTERNATYWA_* (czyste funkcje)
   formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
 tests/
@@ -195,8 +196,8 @@ u siebie do pliku JSON, uruchamiasz CLI lokalnie i oglądasz tylko raport.
 ```
 python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
        [--pomin-typy KOREKTA,ROZ] [--json wynik.json] [--csv wynik.csv]
-       [--dopusc-ujemne | --nie-dopuszczaj-ujemnych]
-       [--max-przyklady N] [--mapowanie mapowanie.json]
+       [--dopusc-ujemne | --nie-dopuszczaj-ujemnych] [--ilosc-zestawu tak|nie]
+       [--tryb-opcji auto|jawny|awaryjny] [--max-przyklady N] [--mapowanie mapowanie.json]
 ```
 
 **Wartości ujemne - `--dopusc-ujemne` (domyślnie włączone).** W zapisanych dokumentach ujemna ilość
@@ -250,7 +251,10 @@ albo `obliczenia`).
 | `NAGLOWEK_NIZSZY` / `NAGLOWEK_WYZSZY` | nagłówek różni się od sumy pozycji o więcej niż 0,01 (porównanie: netto, potem brutto, potem VAT; pokazuje różnicę, różnice na pozostałych polach i `mozliwe_pozycje` - pozycje o wartości równej różnicy, np. pominiętą albo policzoną drugi raz) |
 | `ZESTAW_LICZONY_PODWOJNIE` | nagłówek = suma pozycji "liści" + kwoty pozycji nadrzędnych (zestawów) |
 | `ZESTAW_BEZ_MNOZENIA_PRZEZ_ILOSC` | **podpowiedź** do `ZESTAW_ROZNY_OD_DZIECI` dla zestawu o ilości N != 1: zapisane kwoty zestawu (netto, VAT i brutto) równają się 1 x suma dzieci, czyli ilość zestawu została pominięta (oczekiwane jest N x suma dzieci). To osobny, ważny przypadek: dzieci opisują 1 szt. zestawu. Dowód: `suma_dzieci` w przyczynie; `naglowek_liczony_z_zapisanych_zestawow` mówi, że nagłówek też pomija ilość |
-| `ALTERNATYWY_W_SUMIE` | **informacja** (`informacja: true`, dokument jest w JSON/CSV niezależnie od statusu): dokument ma pozycje najwyższego poziomu z `alternatywa` / `grupa_opcji` (opcje wzajemnie się wykluczają). Do sum wchodzi co najwyżej jedna opcja z grupy; przyczyna listuje grupy i opcje (`wliczona`), `dopasowanie` (`zgodne` albo `najblizsze`) i `naglowek_zawiera_wszystkie_opcje` (alternatywy dodane do sumy "po cichu") |
+| `ALTERNATYWY_W_SUMIE` | **informacja** (`informacja: true`, dokument jest w JSON/CSV niezależnie od statusu): **tylko tryb awaryjny** (dokument bez pola `tryb_opcji`): dokument ma pozycje najwyższego poziomu z `alternatywa` / `grupa_opcji` (opcje wzajemnie się wykluczają). Do sum wchodzi co najwyżej jedna opcja z grupy; przyczyna listuje grupy i opcje (`wliczona`), `dopasowanie` (`zgodne` albo `najblizsze`) i `naglowek_zawiera_wszystkie_opcje` (alternatywy dodane do sumy "po cichu") |
+| `OPCJA_W_SUMIE` | **niespójność** (tryb jawny, pola `tryb_opcji` / `wybrana`): suma dokumentu zawiera pozycje trybu `opcja`, które nie mają `wybrana=true`. Przyczyna wskazuje te pozycje (netto/vat/brutto), `roznica_wzgledem_naglowka` (nagłówek - suma wliczona) i `suma_wliczona`. Wykrywana tylko wtedy, gdy nagłówek zgadza się (z tolerancją grosza) z sumą wliczoną + jakimś podzbiorem niewybranych opcji; inaczej zostaje sama `SUMA_POZYCJI_ROZNA_OD_DOKUMENTU` |
+| `ALTERNATYWA_BEZ_WYBORU` | **niespójność** (tryb jawny): w grupie `grupa_opcji` żadna alternatywa nie ma `wybrana=true`, a zasada mówi, że do sumy wchodzi dokładnie jedna. Przyczyna listuje grupy i pozycje z kwotami, `roznica_wzgledem_naglowka` oraz `naglowek_pasuje_do` (która alternatywa dałaby sumę równą nagłówkowi) |
+| `ALTERNATYWA_WIELE_WYBRANYCH` | **niespójność** (tryb jawny): w grupie więcej niż jedna alternatywa z `wybrana=true` (do sumy wchodzą wtedy wszystkie wybrane). Przyczyna: grupy z kwotami, `wybranych`, `naglowek_pasuje_do_jednej` oraz `naglowek_zawiera_wszystkie_wybrane` |
 | `ZESTAW_NIEODSWIEZONY` | **podpowiedź** do `ZESTAW_ROZNY_OD_DZIECI` (bez wyjaśnienia narzutem/rabatem): pozycja nadrzędna nie została przeliczona po zmianie dziecka. Dowody (`dowody` w przyczynie): różnica równa wartości dokładnie jednego dziecka; nagłówek zgadza się z sumą dzieci, a zestaw nie; albo nagłówek zgadza się z zapisanymi kwotami zestawów (`naglowek_liczony_z_zapisanych_zestawow`) |
 | `BRUTTO_ROWNE_NETTO` | **podpowiedź**: kwota brutto równa netto mimo stawki VAT > 0 (brak VAT w brutto) - pozycje, wiersz stawki albo sumy dokumentu; pomijane są kwoty, od których VAT zaokrągla się do mniej niż grosza |
 | `ZESTAW_Z_NARZUTEM` | **informacja, nie błąd**: pozycja nadrzędna (zestaw) ma własny `narzut_proc` / `marza_proc` / `rabat_proc`, a jej zapisane kwoty różnią się od sumy dzieci dokładnie o ten narzut/rabat (netto w granicach 0,01, VAT i brutto z tolerancją 0,01 na dziecko). Taka różnica nie jest zgłaszana jako `ZESTAW_ROZNY_OD_DZIECI`. Jeśli nagłówek dokumentu = suma liści + różnice takich zestawów, sumy dokumentu też uznawane są za zgodne (`naglowek_uwzglednia_zestawy: true`) |
@@ -587,10 +591,75 @@ zaokrąglania, przy `N = 1` bez dodatkowego zaokrąglania). Podzestawy liczone r
 * Podsumowanie stawek: wkład zestawu rozkładany na stawki liści (zaokrąglenie na stawkę, różnica na największą),
   tolerancja VAT na stawkę rośnie z sumą mnożników (0,005 x suma).
 
-**Alternatywy (OPCJA 1/2):** opcjonalne pole pozycji najwyższego poziomu `alternatywa=true` albo
-`grupa_opcji="nazwa"`. Do sumy wchodzi co najwyżej jedna pozycja z grupy; wybierana jest kombinacja
-najlepiej pasująca do nagłówka. Raport: `ALTERNATYWY_W_SUMIE` z listą pozycji (informacja, nie niespójność).
-Bez pola zachowanie jak dotąd.
+**Alternatywy w trybie awaryjnym:** patrz następna sekcja ("Opcje i alternatywy").
+
+### Opcje i alternatywy
+
+Pozycje **najwyższego poziomu** (nie dzieci zestawu) mogą być opcjonalne. Dziś są dwa sposoby, a biblioteka sama wybiera:
+
+* **tryb jawny** - aplikacja zapisuje w pozycjach, co jest opcją i co klient wybrał;
+* **tryb awaryjny** - dla dokumentów bez tych pól: stare pola `alternatywa` / `grupa_opcji` i dobór kombinacji
+  najlepiej pasującej do nagłówka (z rundy 6).
+
+| Pole pozycji | Znaczenie |
+|---|---|
+| `tryb_opcji` | `"brak"` (domyślny: zwykła pozycja), `"opcja"` albo `"alternatywa"` (wielkość liter bez znaczenia; puste = nie podano) |
+| `grupa_opcji` | nazwa grupy alternatyw; alternatywy bez nazwy tworzą jedną grupę domyślną. Dla `opcja` ignorowane |
+| `wybrana` | `true`/`false` (też `"tak"`/`"nie"`, `1`/`0`; puste = nie) - czy pozycja wchodzi do sumy |
+
+**Model (tryb jawny).** Tryb jawny obowiązuje w dokumencie, jeśli **którakolwiek** pozycja najwyższego poziomu ma
+niepustą wartość `tryb_opcji`. Wtedy suma dokumentu = pozycje `brak` + pozycje `alternatywa` z `wybrana=true` +
+pozycje `opcja` z `wybrana=true`. Nie ma żadnego doboru kombinacji do nagłówka, a pola `alternatywa` ani `grupa_opcji`
+jako znacznika alternatywy nie są wtedy brane pod uwagę (`grupa_opcji` tylko nazywa grupę); pozycja bez `tryb_opcji`
+w takim dokumencie to `brak`. Pola opcji u dzieci zestawu są ignorowane. Zestaw z `ilosc` i dziećmi (runda 6) może
+być opcją albo alternatywą: wnosi wtedy `N x dzieci`, a jego dzieci nie są liczone drugi raz.
+
+**Kody** (kwoty `netto`/`vat`/`brutto` pozycji i `roznica_wzgledem_naglowka` są w przyczynie):
+
+| Kod | Rodzaj | Kiedy |
+|---|---|---|
+| `OPCJA_W_SUMIE` | niespójność | nagłówek zawiera opcje bez `wybrana=true` |
+| `ALTERNATYWA_BEZ_WYBORU` | niespójność | grupa bez żadnej wybranej |
+| `ALTERNATYWA_WIELE_WYBRANYCH` | niespójność | grupa z więcej niż jedną wybraną |
+| `ALTERNATYWY_W_SUMIE` | informacja | tylko tryb awaryjny |
+
+Trzy pierwsze są niespójnościami (pojawiają się w `sprawdz_spojnosc` jako wpisy `zakres: "grupa:<nazwa>"`, a
+`OPCJA_W_SUMIE` jako wpis `dokument` obok `SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`; w CLI dodatkowo jako przyczyny, które
+ustawiają status `niespojny`), bo łamią zasadę modelu albo oznaczają, że zapisana suma nie odpowiada wyborowi klienta.
+`ALTERNATYWY_W_SUMIE` zostaje informacją, bo w trybie awaryjnym wybór jest tylko zgadywany.
+
+**`poza_suma`.** `sprawdz_spojnosc` zwraca `WynikSpojnosci` - zwykłą listę niespójności (pusta = spójny; wszystko
+działa jak dotąd) z polami `poza_suma` i `opcje`. `poza_suma` to suma niewliczonych pozycji trybu `opcja`:
+`{"netto", "vat", "brutto", "pozycje": [{indeks, id, netto, vat, brutto}]}` (do pokazania pod sumą w PDF; zera i pusta
+lista, gdy takich opcji nie ma). Niewybrane alternatywy nie są "poza sumą" - wykluczają się z wybraną. Zestaw wnosi
+`N x dzieci`.
+
+**CLI.** Nic nowego nie jest wymagane. `--tryb-opcji auto|jawny|awaryjny` (domyślnie `auto`: jawny, gdy dokument ma
+pole `tryb_opcji`, inaczej awaryjny); `jawny` wymusza tryb jawny (bez pól wszystko jest `brak`), `awaryjny` ignoruje
+`tryb_opcji` i `wybrana`. Nazwy pól w bazie mapujesz tak jak resztę pól pozycji (`"pozycja": {"tryb_opcji": "rodzaj_linii",
+"wybrana": "w_ofercie"}`); wbudowane aliasy: `tryb_pozycji`, `wybrany`, `wliczona`. W bibliotece: `oblicz(..., tryb_opcji=)`,
+`sprawdz_spojnosc(..., tryb_opcji=)`, `dokument_z_slownika(..., tryb_opcji=)` (albo klucz `"tryb_opcji"` w dokumencie)
+i `sprawdz_dokument(..., tryb_opcji=)`; w trybie jawnym `oblicz()` ignoruje `wlaczone_alternatywy`.
+
+Przykład (fikcyjna oferta: usługa bazowa 100,00, opcja 50,00 niewybrana, alternatywy w grupie `kolor`: 200,00
+wybrana i 300,00; suma netto = 100 + 200 = 300,00):
+
+```json
+{"id": "OF/10", "typ": "OF", "suma_netto": "300.00", "suma_vat": "69.00", "suma_brutto": "369.00",
+ "pozycje": [
+   {"id": "P1", "ilosc": 1, "stawka_vat": 23, "netto": "100.00", "vat": "23.00", "brutto": "123.00"},
+   {"id": "P2", "ilosc": 1, "stawka_vat": 23, "netto": "50.00", "vat": "11.50", "brutto": "61.50",
+    "tryb_opcji": "opcja", "wybrana": false},
+   {"id": "P3", "ilosc": 1, "stawka_vat": 23, "netto": "200.00", "vat": "46.00", "brutto": "246.00",
+    "tryb_opcji": "alternatywa", "grupa_opcji": "kolor", "wybrana": true},
+   {"id": "P4", "ilosc": 1, "stawka_vat": 23, "netto": "300.00", "vat": "69.00", "brutto": "369.00",
+    "tryb_opcji": "alternatywa", "grupa_opcji": "kolor", "wybrana": false}]}
+```
+
+Ten dokument jest spójny, a `sprawdz_spojnosc(...).poza_suma` to `50.00 / 11.50 / 61.50`. Gdyby nagłówek miał netto
+`350.00` (opcja policzona mimo `wybrana=false`), CLI zgłosi `OPCJA_W_SUMIE` (przyczyna z `pozycje` = P2 i
+`roznica_wzgledem_naglowka.netto` = `50.00`), a dla grupy `kolor` bez żadnej wybranej - `ALTERNATYWA_BEZ_WYBORU`
+z `naglowek_pasuje_do` wskazującym pozycję, której dodanie daje sumę nagłówka.
 
 ### Typowe wyniki i co z nimi zrobić
 
@@ -612,6 +681,9 @@ i z różnicami rzędu groszy, to nie błąd dokumentów, tylko inna reguła zao
 | `ZESTAW_ROZNY_OD_DZIECI` | **sprawdź dokument** - kwota pozycji nadrzędnej nie jest sumą jej dzieci i nie wynika z jej własnego narzutu/rabatu |
 | `ZESTAW_BEZ_MNOZENIA_PRZEZ_ILOSC` | **sprawdź dokument** - wartość zestawu nie została pomnożona przez jego ilość (lub dzieci mają ilość zestawu zamiast 1 szt.); jeśli dzieci w Waszych danych opisują całą ilość zestawu, uruchom z `--ilosc-zestawu nie` |
 | `ALTERNATYWY_W_SUMIE` | **zignoruj** gdy `dopasowanie: zgodne`; **sprawdź dokument** gdy `najblizsze` (zwłaszcza `naglowek_zawiera_wszystkie_opcje: true` - opcje sumują się mimo, że się wykluczają) |
+| `OPCJA_W_SUMIE` | **sprawdź dokument** - nagłówek został policzony razem z opcją, której klient nie wybrał (`wybrana` != true); popraw sumę albo ustaw `wybrana=true` na opcji, jeśli klient ją jednak zamówił |
+| `ALTERNATYWA_BEZ_WYBORU` | **sprawdź dokument** - w grupie alternatyw nie zaznaczono żadnej; uzupełnij wybór (`naglowek_pasuje_do` podpowiada, która pasuje do nagłówka) |
+| `ALTERNATYWA_WIELE_WYBRANYCH` | **sprawdź dokument** - w grupie zaznaczono kilka alternatyw, a wykluczają się; zostaw jedną (`naglowek_pasuje_do_jednej` podpowiada, która pasuje do nagłówka) |
 | `ZESTAW_NIEODSWIEZONY` | **sprawdź dokument** - przelicz zestaw (zapisz dokument ponownie po zmianie dziecka); jeśli to częste, błąd jest w aplikacji, która nie odświeża zestawu |
 | `BRUTTO_ROWNE_NETTO` | **sprawdź dokument** - brak VAT w brutto; zwykle błąd zapisu lub import bez przeliczenia, nie zaokrąglenie |
 | `ZESTAW_Z_NARZUTEM` | **zignoruj** - różnica zestawu względem sumy dzieci wynika z jego własnego narzutu lub rabatu |
@@ -723,3 +795,16 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     podpowiedź może być fałszywa przy zestawie, który po prostu ma błędną kwotę; `inna` oznacza brak dowodów.
 17. **`BRUTTO_ROWNE_NETTO`:** pomija kwoty, od których VAT zaokrągla się do mniej niż grosza, oraz stawki `zw`/`np`/0;
     nie rozpoznaje odwróconego obciążenia, w którym brutto równe netto jest zamierzone.
+18. **Ilość zero w opcji:** czy opcja może mieć `ilosc = 0`? Biblioteka ją dopuszcza (opcja wnosi wtedy 0 i niczego
+    nie zmienia w sumie), ale w ofercie dla klienta taka pozycja raczej nie ma sensu - do ustalenia, czy aplikacja ma
+    ją blokować, czy traktować `0` jak "opcja wyłączona".
+19. **Opcja wybrana po wysłaniu oferty:** pole `wybrana` opisuje stan *teraz*. Jeśli klient zmieni wybór po wysłaniu
+    oferty, zapisany nagłówek (i PDF) mogą się rozjechać z polami; biblioteka zgłosi to jako `OPCJA_W_SUMIE`,
+    `ALTERNATYWA_BEZ_WYBORU` albo zwykłą różnicę sum. Do decyzji: czy zmiana wyboru zawsze przelicza nagłówek,
+    czy tworzy nową wersję oferty, i czy wysłana oferta ma zamrażać `wybrana`.
+20. **Tryb jawny od pierwszego pola:** wystarczy jedna pozycja z niepustym `tryb_opcji`, żeby cały dokument przeszedł
+    na tryb jawny (stare `alternatywa` / `grupa_opcji` w tym samym dokumencie przestają działać jako znacznik
+    alternatywy). Dokumenty przejściowe, w których aplikacja zapisuje `tryb_opcji` tylko w części pozycji, trzeba
+    uzupełnić; `--tryb-opcji awaryjny` pozwala porównać oba odczyty.
+21. **Co to jest "poza sumą":** tylko niewybrane *opcje*. Niewybrane alternatywy nie są pokazywane pod sumą; jeśli
+    PDF ma pokazywać także je, wystarczy dołożyć drugą sumę (dane są w `wiersze`/`opcje`).
