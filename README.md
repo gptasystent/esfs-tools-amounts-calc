@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (698 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (720 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -718,7 +718,8 @@ granicznych zwracane jest pierwsze `n`). W aplikacji (Python): dla `pozycja` por
 
 ```
 python -m amounts_calc.skan_kodu SCIEZKA [SCIEZKA...] [--json w.json] [--csv w.csv]
-       [--zrodlo-prawdy funkcje.txt] [--pomin GLOB]... [--waznosc wysoka|srednia|niska]
+       [--zrodlo-prawdy funkcje.txt] [--pomin GLOB]... [--tryb pelny|istotne]
+       [--waznosc wysoka|srednia|niska]
 ```
 
 Szuka w kodzie aplikacji (Python / Flask, TypeScript i JavaScript / React oraz SQL, w tym zapytania w tekstach Pythona
@@ -741,14 +742,37 @@ i TS) miejsc, które **liczą kwoty po swojemu** zamiast wspólną funkcją `kwo
 | `STAWKA_ZW_NP_POMINIETA` | średnia | `stawka IN (23, 8, 5)` / lista `(23, 8, 5)` bez `zw`/`np`, `NOT IN ('zw','np')`, `stawka != 'zw'`, `stawka > 0`, `int/float/Decimal/parseInt/Number(stawka)` bez jawnej obsługi `zw`/`np` w pobliżu (8 linii) |
 | `FUNKCJA_POZA_ZRODLEM_PRAWDY` | niska | definicja funkcji (Python, TS: `function`, strzałkowa, metoda; SQL `CREATE FUNCTION`) o nazwie z członem brutto/netto/vat/kwota/kwoty/suma/sumy/sumuj, której nie ma w liście źródeł prawdy |
 
+**Tryby: `--tryb istotne` (domyślny) i `pelny`.** Na prawdziwym kodzie większość znalezisk to szum, więc każde znalezisko ma
+dwie ważności: jak dotąd (tryb `pelny`, bez zmian) i *po odszumieniu*. Tryb `istotne` pokazuje tylko te, które po
+odszumieniu mają ważność wysoką lub średnią (z ważnością po odszumieniu); w bibliotece `skanuj(..., tryb=)` domyślny
+jest `pelny`, w CLI `istotne`. Podsumowanie (tekst i JSON: `przed_odszumieniem`, `po_odszumieniu`, `tryb`) podaje liczby
+przed i po, w tym wg kodu i ważności, w obu trybach. Odszumianie dotyczy trzech kodów:
+
+* `FLOAT_W_FUNKCJI_KWOTOWEJ` (Python): istotny tylko `float()` użyty w działaniu (`* / + -`) z drugą kwotą lub stawką albo
+  zapisywany do pola kwotowego po obliczeniu; domyślnie `niska`, `srednia`, gdy w tym wyrażeniu jest mnożenie lub dzielenie
+  ze stawką/VAT. Sam odczyt, konwersja, `abs(float(x))`, JSON, formatowanie, `def ...(x: float) -> float` to szum. SQL
+  (`float`/`real` w kolumnie kwotowej) bez zmian.
+* `ROUND_PYTHON_BANKOWE`: zostaje `wysoka` tylko, gdy w tej samej linii lub w sąsiednich 2 liniach (bez komentarzy) jest
+  identyfikator z członem netto, brutto, vat, stawka lub wartosc; inaczej `niska` (cena za kg, zł na km, średnie, procenty,
+  rozmiary, współrzędne). Dopasowanie po członach identyfikatora, nie po podciągu (`private` nie jest vat).
+* `FUNKCJA_POZA_ZRODLEM_PRAWDY`: `srednia` tylko, gdy ciało funkcji ma działanie arytmetyczne na netto/brutto/vat (operatory
+  poza tekstami); inaczej szum. Zawsze szum: formatery (`fmt*`, `format*`, `render*`, `display*`, `show*`, `print*`, `to_string`),
+  komponenty React (nazwa wielką literą, np. `KwotyCard`), samo `toLocaleString`/`Intl`/JSX.
+
+Wzorce, które muszą zostać znalezione w trybie `istotne` (testy regresji): brutto przez `* (1 + vat/100)` bez zaokrąglenia
+(JS i Python), `round(netto * (1 + vat/100.0), 2)` jako brutto, `Math.round(netto * vat) / 100` i `kwota_vat = netto * (vat / 100)`
+jako zapis kwoty VAT. Na wymyślonym korpusie szumu (27 fragmentów) tryb `pelny` daje 27 znalezisk, a `istotne` 0; na korpusie
+razem z 20 prawdziwymi wzorcami (`tests/skan_szum.py`) przed odszumieniem jest 54 znalezisk (wysoka 22, srednia 17, niska 15),
+po odszumieniu 23 (wysoka 14, srednia 9).
+
 **Jak czytać raport.** Linia: `plik:linia  KOD [ważność]  fragment` (fragment to linia kodu bez nadmiaru spacji, do 160 znaków).
 Znaleziska są pogrupowane w **moduły** = katalog pliku względem skanowanego katalogu (`routes`, `utils`,
 `frontend/pages`, `db/migracje`; pliki w korzeniu to `(korzeń)`), moduły od największej liczby znalezisk, w module od
 najwyższej ważności. Na końcu jest podpowiedź poprawki dla każdego kodu (w JSON/CSV przy każdym znalezisku). JSON ma
 `podsumowanie` (pliki, znaleziska wg ważności, kodu i modułu) i listę `znaleziska`; CSV ma kolumny
 `plik;linia;kod;waznosc;modul;fragment;podpowiedz` (`;`, UTF-8 z BOM, CRLF; fragmenty zaczynające się od `=`, `+`, `@`
-dostają apostrof). Zacznij od **wysokiej** ważności; `FUNKCJA_POZA_ZRODLEM_PRAWDY` to lista funkcji do ręcznego przeglądu
-(część deleguje do wspólnej funkcji - dopisz je do pliku źródeł prawdy).
+dostają apostrof). Zacznij od **wysokiej** ważności; `FUNKCJA_POZA_ZRODLEM_PRAWDY` (po odszumieniu: funkcje z arytmetyką na netto/brutto/vat) to lista do
+ręcznego przeglądu (część deleguje do wspólnej funkcji - dopisz je do pliku źródeł prawdy).
 
 **Wyłączenia.** Linię wyłącza komentarz `# kwoty-ok: powód` (Python), `// kwoty-ok: powód` (TS) lub `-- kwoty-ok: powód`
 (SQL): w tej samej linii, w osobnej linii bezpośrednio nad nią albo w dowolnej linii wieloliniowej instrukcji (powód jest
@@ -929,3 +953,7 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     per pozycja; nie ma przypadków liczenia netto z brutto ani rabatu dokumentu, bo aplikacja nie podała dla nich reguły.
 24. **Opcje: próg 25% dopasowania `najblizsze`** jest wartością dobraną na oko (stała `PROGLICZNY` w `opcje.py`); do
     potwierdzenia, jak duży błąd narzutu realnie występuje.
+25. **Odszumianie skanera: progi.** Okno 2 linii dla `round()`, zestaw słów kontekstu (netto, brutto, vat, stawka, wartosc) i lista
+    formaterów (`fmt*`, `format*`, `render*`...) to wartości dobrane na wymyślonym korpusie; do sprawdzenia na prawdziwym kodzie
+    (`--tryb pelny` pozwala porównać). `float` w sumie netto + VAT ma po odszumieniu ważność `niska`, więc tryb `istotne` go
+    ukrywa; jeśli taki zapis ma być widoczny, trzeba podnieść go do `srednia`.
