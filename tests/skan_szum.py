@@ -53,9 +53,9 @@ ISTOTNE = [
     # 2. round na netto/brutto/vat/stawka
     ("round vat", "py", "vat = round(netto * stawka / 100, 2)\n", ROUND, "wysoka"),
     ("round brutto z 1+vat/100", "py", "brutto = round(netto * (1 + vat/100.0), 2)\n", ROUND, "wysoka"),
-    ("round wartosc_brutto", "py", "x = round(wartosc_brutto, 2)\n", ROUND, "wysoka"),
-    ("round z sasiednia linia", "py", "netto = pozycja.netto\nsuma = round(cena * ilosc, 2)\n", ROUND, "wysoka"),
-    ("round z linia ponizej", "py", "razem = round(cena * ilosc, 2)\nvat = razem * stawka\n", ROUND, "wysoka"),
+    ("round wartosc_brutto", "py", "x = round(wartosc_brutto, 2)\n", ROUND, "niska"),
+    ("round z sasiednia linia", "py", "netto = pozycja.netto\nsuma = round(cena * ilosc, 2)\n", ROUND, "niska"),
+    ("round z linia ponizej", "py", "razem = round(cena * ilosc, 2)\nvat = razem * stawka\n", ROUND, "niska"),
     # 3. funkcje z działaniami na netto/brutto/vat
     ("def brutto", "py", "def policz_brutto(netto, vat):\n    return netto + vat\n", FUNKCJA, "srednia"),
     ("function vat", "ts",

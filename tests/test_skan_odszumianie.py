@@ -60,7 +60,7 @@ class TestPunkt1Float(unittest.TestCase):
 
 class TestPunkt2Round(unittest.TestCase):
     def test_slowa_w_sasiednich_dwoch_liniach(self):
-        blisko = "netto = 1\n\nx = round(cena / 3, 2)\n"
+        blisko = "netto = 1\n\nx = round(cena * stawka, 2)\n"
         daleko = "netto = 1\n\n\nx = round(cena / 3, 2)\n"
         self.assertEqual(po(blisko, "py", ROUND), "wysoka")
         self.assertEqual(po(daleko, "py", ROUND), "niska")
@@ -70,8 +70,8 @@ class TestPunkt2Round(unittest.TestCase):
 
     def test_slowa_kluczowe_to_tokeny_nie_podciagi(self):
         self.assertEqual(po("private_cena = round(cena / 3, 2)\n", "py", ROUND), "niska")
-        self.assertEqual(po("vat_cena = round(cena / 3, 2)\n", "py", ROUND), "wysoka")
-        self.assertEqual(po("x = round(cena / 3, 2)  # nic\ny = stawkaVat\n", "py", ROUND), "wysoka")
+        self.assertEqual(po("vat_cena = round(cena * vat, 2)\n", "py", ROUND), "wysoka")
+        self.assertEqual(po("x = round(cena * vatProc, 2)  # nic\n", "py", ROUND), "wysoka")
 
     def test_round_niepoprawne_miejsca_bez_zmian(self):
         z = skanuj_tekst("x = round(cena)\n", "x", "py")[0]

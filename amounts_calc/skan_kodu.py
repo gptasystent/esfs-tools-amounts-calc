@@ -368,6 +368,37 @@ def _kontekst_pieniedzy(p, linia):
     return any(tokeny(i) & _TOKENY_ISTOTNE for i in _IDENT.findall(tekst))
 
 
+_ROUND_SCIEZKI_NISKIE = re.compile(r"(?:^|/)(?:kadry|flota|raporty|liczba_slownie|parser_)[^/]*$", re.I)
+_ROUND_TOKENY_VAT = frozenset({"vat", "stawka", "stawki", "proc"})
+_ROUND_TOKENY_CELU = frozenset({"brutto", "vat", "netto", "wartosc"})
+_ROUND_JEDEN_PLUS = re.compile(r"\(\s*1\s*[+-]")
+_ROUND_DZIELNIK_NIEFIN = frozenset({"km", "litry", "litr", "kg", "szt", "dni", "ilosc"})
+_ROUND_CEL = re.compile(r"([A-Za-z_]\w*)\s*(?:\]\s*)?(?:[-+*/]?=(?!=)|:)\s*(?:\(\s*)?$")
+
+
+def _round_dokumentowy(p, linia, sciezka):
+    """round() na kwocie dokumentu (netto/VAT/brutto), a nie na cenie jednostkowej, średniej, raporcie, kadrach:
+    wysoka tylko gdy w argumencie jest stawka VAT / (1 + ...), działanie brutto-netto albo wynik trafia do pola
+    netto/brutto/vat i jest liczony arytmetycznie. Pliki kadry*, flota*, raporty*, liczba_slownie*, parser_* -> niska."""
+    if _ROUND_SCIEZKI_NISKIE.search(sciezka.replace(os.sep, "/")):
+        return False
+    tekst = "\n".join(p.linie[linia:linia + 4])
+    for m in _PY_ROUND.finditer(p.linie[linia]):
+        argumenty, _ = _argumenty(tekst, m.end() - 1)
+        arg = argumenty[0] if argumenty else ""
+        idy = [tokeny(i) for i in _IDENT.findall(arg)]
+        wszystkie = frozenset().union(*idy) if idy else frozenset()
+        if wszystkie & _ROUND_TOKENY_VAT or _ROUND_JEDEN_PLUS.search(arg):
+            return True
+        if "brutto" in wszystkie and "netto" in wszystkie:
+            return True
+        cel = _ROUND_CEL.search(p.linie[linia][:m.start()])
+        arytmetyka = re.search(r"[*/+-]", re.sub(r"float|\(\s*\)|\[[^\]]*\]|'[^']*'|\"[^\"]*\"", "", arg))
+        if cel and tokeny(cel.group(1)) & _ROUND_TOKENY_CELU and arytmetyka:
+            return not (_ROUND_DZIELNIK_NIEFIN & wszystkie and "/" in arg)
+    return False
+
+
 def _funkcja_istotna(p, nr, nazwa):
     """Ważność po odszumieniu dla FUNKCJA_POZA_ZRODLEM_PRAWDY: "srednia", gdy ciało robi działania arytmetyczne na
     netto/brutto/vat; None dla formaterów (fmt*, format*, render*), komponentów React (nazwa wielką literą) i funkcji
@@ -794,7 +825,7 @@ def skanuj_tekst(tekst, sciezka, jezyk, zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
         elif kod == FLOAT_W_FUNKCJI_KWOTOWEJ and jezyk == "py":
             po = _po_float(p.linie[linia], waznosc)
         elif kod == ROUND_PYTHON_BANKOWE:
-            po = waznosc if _kontekst_pieniedzy(p, linia) else NISKA
+            po = waznosc if _kontekst_pieniedzy(p, linia) and _round_dokumentowy(p, linia, sciezka) else NISKA
         else:
             po = waznosc
         wynik.append(Znalezisko(sciezka, linia + 1, kod, waznosc, fragment, KODY[kod][2], po))

@@ -759,6 +759,9 @@ przed i po, w tym wg kodu i ważności, w obu trybach. Odszumianie dotyczy trzec
 * `ROUND_PYTHON_BANKOWE`: zostaje `wysoka` tylko, gdy w tej samej linii lub w sąsiednich 2 liniach (bez komentarzy) jest
   identyfikator z członem netto, brutto, vat, stawka lub wartosc; inaczej `niska` (cena za kg, zł na km, średnie, procenty,
   rozmiary, współrzędne). Dopasowanie po członach identyfikatora, nie po podciągu (`private` nie jest vat).
+  Runda 11: dodatkowo `wysoka` tylko dla kwoty dokumentu: argument ze stawką VAT / `(1 + ...)`, różnicą brutto-netto albo
+  wynik trafia do pola netto/brutto/vat i jest liczony arytmetycznie; pliki `kadry*`, `flota*`, `raporty*`, `liczba_slownie*`,
+  `parser_*` są zawsze `niska` (na realnym kodzie 71 -> 36 znalezisk).
 * `FUNKCJA_POZA_ZRODLEM_PRAWDY`: `srednia` tylko, gdy ciało funkcji ma działanie arytmetyczne na netto/brutto/vat (operatory
   poza tekstami); inaczej szum. Zawsze szum: formatery (`fmt*`, `format*`, `render*`, `display*`, `show*`, `print*`, `to_string`),
   komponenty React (nazwa wielką literą, np. `KwotyCard`), samo `toLocaleString`/`Intl`/JSX.
