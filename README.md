@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (465 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (583 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -59,7 +59,8 @@ amounts_calc/
   klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA(_NARZUT), VAT_WYLICZONY_* - przyczyny niespójności (czyste funkcje)
   oferty.py       pozycje z ceną zakupu i narzutem, zestawy z własnym narzutem/rabatem (dane dla check.py)
   podpowiedzi.py  ZESTAW_NIEODSWIEZONY / BRUTTO_ROWNE_NETTO / inna - podpowiedź dla każdej niespójności
-  hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja i liście pod pozycją
+  hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja, liście pod pozycją, limit głębokości (10)
+  zestawy.py      model zestawu z ilością: mnożniki, N x dzieci, podzestawy, alternatywy (czyste funkcje)
   formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
 tests/
@@ -568,6 +569,29 @@ Dokument `OF/1` (poprawna oferta) ma w raporcie tylko informację `ILOSC_X_CENA_
               "wyjasnienie": "narzut nie został zastosowany", "narzut_wynikowy": "0.00"}]}
 ```
 
+### Ilość pozycji zbiorczej (zestawu)
+
+**Model:** pozycja zbiorcza ma ilość `N`, a jej dzieci opisują **jeden** zestaw (ilości i ceny dzieci
+na 1 szt. zestawu). Wartość zestawu = `N x suma dzieci` (netto, VAT i brutto osobno; `kwota()` wg reguły
+zaokrąglania, przy `N = 1` bez dodatkowego zaokrąglania). Podzestawy liczone rekurencyjnie (mnożnik liścia
+= iloczyn `N` przodków), maksymalna głębokość 10 poziomów (głębiej: `NIEPOPRAWNA_HIERARCHIA`).
+
+* Do sumy dokumentu wchodzi wartość zestawu najwyższego poziomu (`N x dzieci`); dzieci nie są liczone drugi raz.
+* Zestaw zapisany inaczej niż `N x dzieci` daje `ZESTAW_ROZNY_OD_DZIECI`; gdy zapisane kwoty równają się
+  `1 x dzieci` przy `N != 1`, podpowiedź to `ZESTAW_BEZ_MNOZENIA_PRZEZ_ILOSC` (ilość pominięta w zestawie).
+  Różnice <= 0,01 to zaokrąglenie. Ułamkowe `N` (0,5; 2,5) i `N = 0` są dozwolone; netto, VAT i brutto
+  zestawu są zaokrąglane niezależnie, więc `netto + vat` może różnić się od `brutto` o grosz.
+* Opcje: CLI `--ilosc-zestawu=tak|nie` (domyślnie `tak`); biblioteka `oblicz(..., ilosc_zestawu=False)`
+  domyślnie zachowuje stare zachowanie (ignoruje `ilosc` nadrzędnej), `sprawdz_spojnosc(..., ilosc_zestawu=)`
+  dotyczy tylko wejścia słownikowego. Adapter rozpoznaje aliasy `ilosc_zestawu`, `alternatywa`/`opcja`, `grupa_opcji`.
+* Podsumowanie stawek: wkład zestawu rozkładany na stawki liści (zaokrąglenie na stawkę, różnica na największą),
+  tolerancja VAT na stawkę rośnie z sumą mnożników (0,005 x suma).
+
+**Alternatywy (OPCJA 1/2):** opcjonalne pole pozycji najwyższego poziomu `alternatywa=true` albo
+`grupa_opcji="nazwa"`. Do sumy wchodzi co najwyżej jedna pozycja z grupy; wybierana jest kombinacja
+najlepiej pasująca do nagłówka. Raport: `ALTERNATYWY_W_SUMIE` z listą pozycji (informacja, nie niespójność).
+Bez pola zachowanie jak dotąd.
+
 ### Typowe wyniki i co z nimi zrobić
 
 Jedna linia na kod. Zalecenia: **zignoruj** - nic nie trzeba robić; **sprawdź dokument** - otwórz dokument
@@ -664,8 +688,9 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
    rozdziału groszy, można dodać ją jako kolejny wariant porównania.
 6. **Precyzja ceny jednostkowej:** cena po rabacie jest zaokrąglana do 4 miejsc zawsze (też bez
    rabatu), więc cena wejściowa z 5+ miejscami zostanie zaokrąglona - do potwierdzenia.
-7. **Model zestawów:** przyjęto, że pozycja nadrzędna jest wierszem zbiorczym (jej kwoty = suma dzieci,
-   własna cena ignorowana). Odwrotny model - nadrzędna niesie cenę zestawu, a dzieci są tylko opisowe -
+7. **Model zestawów:** przyjęto, że pozycja nadrzędna jest wierszem zbiorczym (jej kwoty = `N x` suma dzieci,
+   własna cena ignorowana; dzieci zawsze opisują 1 szt. zestawu - do potwierdzenia na prawdziwych danych,
+   także czy opcje/alternatywy zawsze są oznaczone osobnym polem). Odwrotny model - nadrzędna niesie cenę zestawu, a dzieci są tylko opisowe -
    nie jest obsługiwany; trzeba potwierdzić na prawdziwych ZK/ofertach, który występuje.
 8. **Definicja `POLGROSZ`:** różnica <= 0,01 oraz niezaokrąglona (> 2 miejsca) wartość po którejś stronie.
    Progi `0,01` dla `NAGLOWEK_*` i `ILOSC_X_CENA` to stała `PROG` w `klasyfikacja.py`.
