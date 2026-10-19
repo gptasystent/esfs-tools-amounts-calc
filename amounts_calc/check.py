@@ -24,13 +24,15 @@ from collections import Counter
 from decimal import Decimal, DecimalException
 
 from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
-from .bledy import (BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
+from .bledy import (BRAK_CENY, BRAK_POLA, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
                     NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ,
-                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
+                    SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
 from .hierarchia import zbuduj_hierarchie
-from .klasyfikacja import przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyny_naglowka
+from .formatowanie import miejsca_znaczace
+from .klasyfikacja import (przyczyna_ilosc_x_cena, przyczyna_polgrosz, przyczyna_vat_wyliczony,
+                           przyczyny_naglowka)
 from .model import dokument_z_slownika
 from .obliczenia import oblicz
 from .stawki import do_decimal
@@ -81,7 +83,7 @@ def zbior_typow(typy):
 
 
 ISTOTNE = frozenset({NAGLOWEK_ZERO, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, ILOSC_X_CENA, ZESTAW_LICZONY_PODWOJNIE,
-                     NIEZGODNY_Z_BIBLIOTEKA})
+                     NIEZGODNY_Z_BIBLIOTEKA, VAT_WYLICZONY_ROZNY})
 
 
 def nazwy_typow(typy):
@@ -153,13 +155,44 @@ def _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony):
     return wiersze, sumy, zrodlo
 
 
-def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice):
+def _wylicz_vat(pozycje, dzieci, dopusc_ujemne):
+    """VAT i brutto wyliczone biblioteką ze `stawka_vat` i zapisanego `netto` każdej pozycji (w obu trybach VAT).
+
+    Zapisane netto pozycji traktowane jest jako gotowa wartość (bez ponownego rabatu). None, gdy któraś
+    pozycja nie ma stawki - wtedy zostaje BRAK_VAT_W_POZYCJACH."""
+    liscie = [p for i, p in enumerate(pozycje) if i not in dzieci]
+    if not liscie or any(p.get("stawka_vat") is None for p in liscie):
+        return None
+    wejscie = [{"ilosc": 1, "cena_netto_jedn": p["netto"], "stawka_vat": p["stawka_vat"]} for p in liscie]
+    warianty = {}
+    for tv in (VAT_PER_STAWKA, VAT_PER_POZYCJA):
+        d = oblicz(wejscie, tryb="netto", tryb_vat=tv, dopusc_ujemne=dopusc_ujemne)
+        warianty[tv] = {"vat": d.suma_vat, "brutto": d.suma_brutto, "netto": d.suma_netto,
+                        "wg_stawek": [{"stawka": s.stawka_vat, "netto": s.netto, "vat": s.vat}
+                                      for s in d.podsumowanie]}
+    return warianty
+
+
+def _scal_polgrosze(przyczyny):
+    pg = [c for c in przyczyny if c["kod"] == POLGROSZ]
+    if len(pg) < 2:
+        return przyczyny
+    pierwszy = dict(pg[0], roznica=max(c["roznica"] for c in pg), liczba=sum(c.get("liczba", 1) for c in pg))
+    return [pierwszy if c is pg[0] else c for c in przyczyny if c is pg[0] or c["kod"] != POLGROSZ]
+
+
+def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopasowanie_zaden, najlepsze_roznice,
+               wyliczony=None):
     """Lista przyczyn (kody z klasyfikacja.py); oznacza `drobiazg` na niespójnościach będących POLGROSZEM."""
     przyczyny = []
-    if rodzaj == "brak_vat":
+    if rodzaj == "brak_vat" and wyliczony is None:
         przyczyny.append({"kod": BRAK_VAT_W_POZYCJACH, "pole": "vat", "roznica": None,
-                          "opis": "pozycje nie mają pola VAT - sprawdzono tylko netto (i brutto) pozycji z nagłówkiem; "
-                                  "dane niepełne, nie błąd"})
+                          "opis": "pozycje nie mają pola VAT ani (wszystkie) stawki - sprawdzono tylko netto "
+                                  "(i brutto) pozycji z nagłówkiem; dane niepełne, nie błąd"})
+    elif rodzaj == "brak_vat":
+        niezaokraglone = any(w["netto"] is not None and miejsca_znaczace(w["netto"]) > 2
+                             for w in wiersze if not w["zestaw"])
+        przyczyny.append(przyczyna_vat_wyliczony(wyliczony, zapisany.suma_vat, zapisany.suma_brutto, niezaokraglone))
     if sumy is not None:
         naglowek = {"netto": zapisany.suma_netto, "vat": zapisany.suma_vat, "brutto": zapisany.suma_brutto}
         przyczyny += przyczyny_naglowka(naglowek, sumy, wiersze, zrodlo)
@@ -179,6 +212,7 @@ def _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony, dopaso
             wynik["niespojnosci"][i]["drobiazg"] = True
     if pg:
         przyczyny.append(pg)
+    przyczyny = _scal_polgrosze(przyczyny)
     istotne = any(not n.get("drobiazg") for n in wynik["niespojnosci"]) or any(c["kod"] in ISTOTNE for c in przyczyny)
     if dopasowanie_zaden and not istotne:
         reszta = [r for i, r in enumerate(najlepsze_roznice) if len(pary) + i not in idx]
@@ -246,22 +280,29 @@ def sprawdz_dokument(surowy, indeks=0, tryb_vat=VAT_PER_STAWKA, mapowanie=None, 
         wynik["niespojnosci"] = niespojnosci
 
         etap = "obliczenia"
-        obliczone = None
+        obliczone = wyliczony = None
         try:
-            obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne)
-            wynik.update(pasuje=pasuje, rozbieznosci=rozbieznosci, liczba_roznic_pozycji=pozycyjne,
-                         tryb_pasujacy=_dopasowanie(pasuje[VAT_PER_STAWKA], pasuje[VAT_PER_POZYCJA]))
-            # do "największej rozbieżności" liczy się lepszy z trybów (mniejsza suma różnic)
-            najlepszy = min((VAT_PER_STAWKA, VAT_PER_POZYCJA),
-                            key=lambda t: sum(abs(r["roznica"]) for r in rozbieznosci[t]))
-            najlepsze = rozbieznosci[najlepszy]
+            if rodzaj == "brak_vat":
+                wyliczony = _wylicz_vat(pozycje, dzieci, dopusc_ujemne)
+            try:
+                obliczone, rozbieznosci, pozycyjne, pasuje = _policz_oba_tryby(kan, zapisany, rodzaj, dopusc_ujemne)
+                wynik.update(pasuje=pasuje, rozbieznosci=rozbieznosci, liczba_roznic_pozycji=pozycyjne,
+                             tryb_pasujacy=_dopasowanie(pasuje[VAT_PER_STAWKA], pasuje[VAT_PER_POZYCJA]))
+                # do "największej rozbieżności" liczy się lepszy z trybów (mniejsza suma różnic)
+                najlepszy = min((VAT_PER_STAWKA, VAT_PER_POZYCJA),
+                                key=lambda t: sum(abs(r["roznica"]) for r in rozbieznosci[t]))
+                najlepsze = rozbieznosci[najlepszy]
+            except BladWalidacji as e:
+                # bez ilości/ceny/stawki w pozycjach bez VAT nie ma czego porównać z biblioteką - zostają sumy
+                if not (rodzaj == "brak_vat" and e.kod in (BRAK_POLA, BRAK_CENY)):
+                    raise
         except (BladWalidacji, DecimalException) as e:
             wynik["blad"] = _blad_z_wyjatku(e, etap)
         obliczony = obliczone[VAT_PER_STAWKA] if obliczone else None
         if rodzaj == "brak_kwot":
             wiersze, sumy, zrodlo = _dane_pozycji(rodzaj, pozycje, zapisany, dzieci, obliczony)
         wynik["przyczyny"] = _przyczyny(wynik, rodzaj, zapisany, wiersze, sumy, zrodlo, obliczony,
-                                        wynik["tryb_pasujacy"] == "zaden", najlepsze)
+                                        wynik["tryb_pasujacy"] == "zaden", najlepsze, wyliczony)
     except (BladWalidacji, DecimalException) as e:
         wynik["blad"] = _blad_z_wyjatku(e, etap)
 

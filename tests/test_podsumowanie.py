@@ -27,7 +27,7 @@ def drobiazg(id):
 
 def niepelny(id):
     return {"id": id, "typ": "FV", "suma_netto": "10.00", "suma_vat": "2.30", "suma_brutto": "12.30",
-            "pozycje": [{"ilosc": 1, "cena_netto_jedn": "10", "stawka_vat": 23, "netto": "10.00"}]}
+            "pozycje": [{"ilosc": 1, "cena_netto_jedn": "10", "netto": "10.00"}]}   # bez VAT i bez stawki
 
 
 def niespojny(id, netto="99.00"):

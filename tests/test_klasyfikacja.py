@@ -183,26 +183,46 @@ class TestNaglowek(unittest.TestCase):
 
 
 class TestBrakVat(unittest.TestCase):
+    """Pozycje bez pola VAT. Ze stawką i netto VAT jest wyliczany (patrz TestVatWyliczony);
+    bez stawki zostaje BRAK_VAT_W_POZYCJACH (dane niepełne, nie błąd)."""
+
     def pozycje(self):
         return [{"ilosc": 1, "cena_netto_jedn": "100", "stawka_vat": 23, "netto": "100.00"},
                 {"ilosc": 2, "cena_netto_jedn": "25", "stawka_vat": 23, "netto": "50.00"}]
 
+    def bez_stawki(self):
+        poz_ = self.pozycje()
+        for p in poz_:
+            del p["stawka_vat"]
+        return poz_
+
     def test_brak_vat_nie_jest_bledem(self):
-        w = sprawdz_dokument(dok("150.00", "34.50", "184.50", self.pozycje()))
+        w = sprawdz_dokument(dok("150.00", "34.50", "184.50", self.bez_stawki()))
         self.assertIsNone(w["blad"])
         self.assertEqual(w["dane"], "brak_vat")
         self.assertEqual(w["status"], "niepelny")
         self.assertEqual(kody(w), {bledy.BRAK_VAT_W_POZYCJACH})
         self.assertEqual(w["niespojnosci"], [])
-        self.assertEqual(w["tryb_pasujacy"], "oba")
+        self.assertIsNone(w["tryb_pasujacy"])      # bez stawki nie ma czego porównać z biblioteką
         self.assertTrue(ma_problem(w))
 
+    def test_brak_stawki_tylko_w_czesci_pozycji_to_nadal_brak_vat(self):
+        poz_ = self.pozycje()
+        del poz_[1]["stawka_vat"]
+        w = sprawdz_dokument(dok("150.00", "34.50", "184.50", poz_))
+        self.assertEqual((w["status"], kody(w)), ("niepelny", {bledy.BRAK_VAT_W_POZYCJACH}))
+
     def test_netto_pozycji_vs_naglowek(self):
-        w = sprawdz_dokument(dok("140.00", "32.20", "172.20", self.pozycje()))
+        w = sprawdz_dokument(dok("140.00", "32.20", "172.20", self.bez_stawki()))
         self.assertEqual(w["status"], "niespojny")
         self.assertEqual(kody(w), {bledy.BRAK_VAT_W_POZYCJACH, bledy.NAGLOWEK_NIZSZY})
         n = [x for x in w["niespojnosci"] if x["kod"] == bledy.SUMA_POZYCJI_ROZNA_OD_DOKUMENTU]
         self.assertEqual((n[0]["pole"], n[0]["oczekiwano"], n[0]["jest"]), ("suma_netto", D("150.00"), D("140.00")))
+
+    def test_netto_pozycji_vs_naglowek_ze_stawkami(self):
+        w = sprawdz_dokument(dok("140.00", "32.20", "172.20", self.pozycje()))
+        self.assertEqual(w["status"], "niespojny")
+        self.assertEqual(kody(w), {bledy.NAGLOWEK_NIZSZY, bledy.VAT_WYLICZONY_ROZNY})   # brak stawek już nie dotyczy
 
     def test_brutto_pozycji_gdy_jest(self):
         poz_ = self.pozycje()
@@ -213,9 +233,14 @@ class TestBrakVat(unittest.TestCase):
         self.assertEqual(jedna(w, bledy.NAGLOWEK_NIZSZY)["pole"], "suma_brutto")
 
     def test_polgrosz_w_niepelnych(self):
-        w = sprawdz_dokument(dok("150.004", "34.50", "184.50", self.pozycje()))
+        w = sprawdz_dokument(dok("150.004", "34.50", "184.50", self.bez_stawki()))
         self.assertEqual(w["status"], "niepelny")
         self.assertEqual(kody(w), {bledy.BRAK_VAT_W_POZYCJACH, bledy.POLGROSZ})
+
+    def test_polgrosz_gdy_vat_wyliczony(self):
+        w = sprawdz_dokument(dok("150.004", "34.50", "184.50", self.pozycje()))
+        self.assertEqual(w["status"], "drobiazg")
+        self.assertEqual(kody(w), {bledy.POLGROSZ, bledy.VAT_WYLICZONY_ZGODNY})
 
     def test_ilosc_x_cena_dziala_na_niepelnych(self):
         poz_ = self.pozycje()
@@ -232,13 +257,18 @@ class TestBrakVat(unittest.TestCase):
         self.assertEqual(w["blad"]["kod"], bledy.BRAK_POLA)
 
     def test_vat_null_jak_brak(self):
-        poz_ = self.pozycje()
+        poz_ = self.bez_stawki()
         for p in poz_:
             p["vat"] = None
         self.assertEqual(sprawdz_dokument(dok("150.00", "34.50", "184.50", poz_))["status"], "niepelny")
 
+    def test_brak_ilosci_i_ceny_nie_jest_bledem_gdy_nie_ma_vat(self):
+        poz_ = [{"stawka_vat": 23, "netto": "100.00"}, {"stawka_vat": 23, "netto": "50.00"}]
+        w = sprawdz_dokument(dok("150.00", "34.50", "184.50", poz_))
+        self.assertEqual((w["blad"], w["status"], kody(w)), (None, "spojny", {bledy.VAT_WYLICZONY_ZGODNY}))
+
     def test_partia_liczy_niepelne(self):
-        wyniki, p = sprawdz_partie([dok("150.00", "34.50", "184.50", self.pozycje())])
+        wyniki, p = sprawdz_partie([dok("150.00", "34.50", "184.50", self.bez_stawki())])
         self.assertEqual(p["status"]["niepelny"], 1)
         self.assertEqual(p["kody"], {bledy.BRAK_VAT_W_POZYCJACH: 1})
         self.assertEqual(p["spojne"], 0)
