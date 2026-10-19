@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (720 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (733 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -751,7 +751,11 @@ przed i po, w tym wg kodu i ważności, w obu trybach. Odszumianie dotyczy trzec
 * `FLOAT_W_FUNKCJI_KWOTOWEJ` (Python): istotny tylko `float()` użyty w działaniu (`* / + -`) z drugą kwotą lub stawką albo
   zapisywany do pola kwotowego po obliczeniu; domyślnie `niska`, `srednia`, gdy w tym wyrażeniu jest mnożenie lub dzielenie
   ze stawką/VAT. Sam odczyt, konwersja, `abs(float(x))`, JSON, formatowanie, `def ...(x: float) -> float` to szum. SQL
-  (`float`/`real` w kolumnie kwotowej) bez zmian.
+  (w plikach `.sql` i zapytaniach w tekstach Pythona/TS): rzutowanie `::float` / `::double precision` / `CAST(... AS float)` na
+  końcu wyrażenia SELECT (`::float AS x`, `::float,`, `::float FROM`, także po `SUM`/`COALESCE`/odejmowaniu w środku) to format
+  wyniku zapytania, nie obliczenie, i nie jest zgłaszane. Zgłaszane jest tylko rzutowanie wewnątrz dalszego obliczenia: rzutowany
+  operand stoi przy `* / + -` (`a::float * b`, `0.23 * a::float`, `SUM(x)::float * stawka`) albo przy porównaniu (`WHERE
+  x::float > 100`, `HAVING`). Typ kolumny `float`/`real`/`double precision` w `CREATE TABLE`/`ALTER TABLE` bez zmian.
 * `ROUND_PYTHON_BANKOWE`: zostaje `wysoka` tylko, gdy w tej samej linii lub w sąsiednich 2 liniach (bez komentarzy) jest
   identyfikator z członem netto, brutto, vat, stawka lub wartosc; inaczej `niska` (cena za kg, zł na km, średnie, procenty,
   rozmiary, współrzędne). Dopasowanie po członach identyfikatora, nie po podciągu (`private` nie jest vat).
@@ -957,3 +961,6 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
     formaterów (`fmt*`, `format*`, `render*`...) to wartości dobrane na wymyślonym korpusie; do sprawdzenia na prawdziwym kodzie
     (`--tryb pelny` pozwala porównać). `float` w sumie netto + VAT ma po odszumieniu ważność `niska`, więc tryb `istotne` go
     ukrywa; jeśli taki zapis ma być widoczny, trzeba podnieść go do `srednia`.
+26. **SQL: rzut w argumencie funkcji.** `COALESCE(kwota::float, 0) * stawka` nie jest zgłaszane (rzutowanie stoi przy przecinku, a
+    mnożenie dotyczy całego wyniku funkcji); skaner patrzy tylko na bezpośredniego sąsiada rzutowanego operandu. Podobnie przypisanie
+    `SET kwota = x::float` nie jest uznawane za porównanie.

@@ -52,7 +52,7 @@ class TestReadmeKody(unittest.TestCase):
     def test_liczba_testow_w_readme_nie_jest_zanizona(self):
         m = re.search(r"\((\d+) test", wczytaj_readme())
         self.assertIsNotNone(m)
-        self.assertGreaterEqual(int(m.group(1)), 720)
+        self.assertGreaterEqual(int(m.group(1)), 733)
 
 
 if __name__ == "__main__":
