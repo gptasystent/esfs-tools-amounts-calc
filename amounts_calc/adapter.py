@@ -40,6 +40,8 @@ MAPOWANIE_DOMYSLNE = {
         "ilosc": ["ilosc", "qty", "liczba_sztuk", "ilosc_zestawu"],
         "alternatywa": ["alternatywa", "opcja"],
         "grupa_opcji": ["grupa_opcji"],
+        "tryb_opcji": ["tryb_opcji", "tryb_pozycji"],
+        "wybrana": ["wybrana", "wybrany", "wliczona"],
         "cena_netto_jedn": ["cena_netto_jedn", "cena_netto"],
         "cena_brutto_jedn": ["cena_brutto_jedn", "cena_brutto"],
         "rabat_proc": ["rabat_proc", "rabat"],

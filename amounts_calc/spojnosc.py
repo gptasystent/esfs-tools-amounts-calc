@@ -7,16 +7,29 @@ from decimal import Decimal, localcontext
 
 from .bledy import (NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI,
                     SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU,
+                    ALTERNATYWA_BEZ_WYBORU, ALTERNATYWA_WIELE_WYBRANYCH, OPCJA_W_SUMIE,
                     VAT_STAWKI_ROZNY_OD_SUMY, ZESTAW_ROZNY_OD_DZIECI)
 from .config import DOMYSLNA, KONTEKST, TRYB_BRUTTO, VAT_PER_STAWKA
 from .hierarchia import zbuduj_hierarchie
 from .model import DokumentWynik, PodsumowanieStawki, dokument_z_dokumentem, dokument_z_slownika
 from .zestawy import (pasuje_do_jednej_sztuki, podsumowanie_stawek, rozwin, sumy_pozycji, tolerancja_vat_stawek,
                       wiersze_z_pozycji)
+from .opcje import poza_suma as _poza_suma, przyczyny_opcji
 from .stawki import wartosc_stawki
 
 _100 = Decimal(100)
 _POLA_KWOT = ("netto", "vat", "brutto")
+
+
+class WynikSpojnosci(list):
+    """Lista niespójności (jak dotąd: pusta = spójny) z dodatkowymi informacjami o dokumencie.
+
+    poza_suma  {"netto", "vat", "brutto", "pozycje": [...]} - suma opcji (tryb "opcja") niewliczonych do sumy dokumentu,
+               do pokazania pod sumą (np. w PDF); zera i pusta lista, gdy dokument nie ma takich opcji
+    opcje      przyczyny OPCJA_W_SUMIE / ALTERNATYWA_BEZ_WYBORU / ALTERNATYWA_WIELE_WYBRANYCH z kwotami pozycji
+               i różnicą względem nagłówka (tryb jawny; w pozostałych dokumentach pusta lista)"""
+    poza_suma = None
+    opcje = ()
 
 
 def _wpis(kod, zakres, pole, oczekiwano, jest, opis):
@@ -32,13 +45,18 @@ def _vat_z_sumy(sumy, tryb, konf):
     return konf.kwota(sumy.netto * r / _100)
 
 
-def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zestawu=None):
-    """Zwraca listę niespójności (pusta = dokument spójny). Każdy wpis to słownik:
-    kod, zakres, pole, oczekiwano, jest, roznica (jest - oczekiwano), opis.
+def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zestawu=None, tryb_opcji=None):
+    """Zwraca listę niespójności (pusta = dokument spójny; to WynikSpojnosci - lista z polami `poza_suma`
+    i `opcje`). Każdy wpis to słownik: kod, zakres, pole, oczekiwano, jest, roznica (jest - oczekiwano), opis.
 
     `ilosc_zestawu` (tylko dla słownika; dla DokumentWynik liczy się jego pole `ilosc_zestawu`): True - ilość
     pozycji nadrzędnej mnoży sumę jej dzieci (dzieci opisują 1 szt. zestawu), False/None - ilość zestawu
     jest ignorowana (dawne zachowanie, chyba że słownik ma klucz "ilosc_zestawu").
+
+    `tryb_opcji` (tylko dla słownika): "auto" (domyślnie) | "jawny" | "awaryjny" - czy opcje i alternatywy wynikają
+    z pól pozycji `tryb_opcji` / `wybrana` (jawny, gdy któraś pozycja najwyższego poziomu ma `tryb_opcji`), czy z
+    `alternatywa` / `grupa_opcji` z doborem kombinacji do nagłówka (awaryjny). W trybie jawnym do sumy wchodzą pozycje
+    "brak", alternatywy z wybrana=true i opcje z wybrana=true.
 
     Sprawdzane:
       SUMA_POZYCJI_ROZNA_OD_DOKUMENTU       suma pozycji != suma dokumentu
@@ -50,6 +68,9 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
                                             W opisie: czy zapisana kwota pasuje do 1 x dzieci (ilość pominięta)
                                             Zestaw wnosi do sum dokumentu N x dzieci, a dzieci nie są liczone
                                             drugi raz. Alternatywy: do sumy wchodzi co najwyżej jedna z grupy
+      OPCJA_W_SUMIE                         (tryb jawny) suma dokumentu = pozycje wliczone + opcje bez wybrana=true
+      ALTERNATYWA_BEZ_WYBORU                (tryb jawny) grupa alternatyw bez wybranej pozycji
+      ALTERNATYWA_WIELE_WYBRANYCH           (tryb jawny) grupa alternatyw z więcej niż jedną wybraną pozycją
       VAT_STAWKI_ROZNY_OD_SUMY              VAT stawki != VAT policzony z sumy stawki
                                             (tylko dla tryb_vat == per_stawka; domyślnie
                                             bierze tryb_vat dokumentu, a gdy nieznany - pomija).
@@ -57,11 +78,11 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
                                             mnożników (zaokrąglenie dziecka rośnie N-krotnie)
     """
     # model zestawów: dla słownika decyduje `ilosc_zestawu` (albo klucz "ilosc_zestawu"), dla DokumentWynik - jego pole
-    dok = dokument if isinstance(dokument, DokumentWynik) else dokument_z_slownika(dokument, ilosc_zestawu)
+    dok = dokument if isinstance(dokument, DokumentWynik) else dokument_z_slownika(dokument, ilosc_zestawu, tryb_opcji)
     konf = konfiguracja
     uwzglednij_ilosc = dok.ilosc_zestawu
     tryb_vat = tryb_vat if tryb_vat is not None else dok.tryb_vat
-    wyniki = []
+    wyniki = WynikSpojnosci()
 
     with localcontext(KONTEKST):
         # netto + vat == brutto: pozycje, stawki, dokument
@@ -92,6 +113,23 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
             if suma != jest:
                 wyniki.append(_wpis(SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, "dokument", "suma_" + pole, suma, jest,
                                     "suma pozycji != suma dokumentu"))
+
+        # opcje i alternatywy w trybie jawnym: poza_suma i naruszenia zasady wyboru
+        wyniki.poza_suma = _poza_suma(wpoz, dzieci, rozw, wlaczone)
+        if dok.opcje_jawne:
+            naglowek = {f: getattr(dok, "suma_" + f) for f in _POLA_KWOT}
+            wyniki.opcje = przyczyny_opcji(wpoz, dzieci, rozw, naglowek, wlaczone)
+            for c in wyniki.opcje:
+                if c["kod"] == OPCJA_W_SUMIE:
+                    for pole in _POLA_KWOT:
+                        if naglowek[pole] != c["suma_wliczona"][pole]:
+                            wyniki.append(_wpis(OPCJA_W_SUMIE, "dokument", "suma_" + pole, c["suma_wliczona"][pole],
+                                                naglowek[pole], c["opis"]))
+                else:
+                    liczba = "wybranych" if c["kod"] == ALTERNATYWA_WIELE_WYBRANYCH else None
+                    for g in c["grupy"]:
+                        wyniki.append(_wpis(c["kod"], "grupa:%s" % (g["grupa"],), "wybrana", Decimal(1),
+                                            Decimal(g["wybranych"] if liczba else 0), c["opis"]))
 
         # pozycja nadrzędna (zestaw) == N x suma dzieci
         for i in sorted(dzieci):

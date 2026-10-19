@@ -32,7 +32,8 @@ _1 = Decimal(1)
 def wiersze_z_pozycji(pozycje):
     """PozycjaWynik -> wiersze (słowniki) dla funkcji z tego modułu."""
     return [{"indeks": p.indeks, "id": p.id, "ilosc": p.ilosc, "netto": p.netto, "vat": p.vat, "brutto": p.brutto,
-             "stawka": p.stawka_vat, "zestaw": p.zestaw, "alternatywa": getattr(p, "alternatywa", None)}
+             "stawka": p.stawka_vat, "zestaw": p.zestaw, "alternatywa": getattr(p, "alternatywa", None),
+             "tryb_opcji": getattr(p, "tryb_opcji", None), "wybrana": getattr(p, "wybrana", None)}
             for p in pozycje]
 
 

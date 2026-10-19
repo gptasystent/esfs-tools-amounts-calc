@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Tuple
 
-from .bledy import BRAK_POLA, NIEPOPRAWNA_STRUKTURA, BladWalidacji
+from .bledy import BRAK_POLA, NIEPOPRAWNA_STRUKTURA, NIEPOPRAWNY_TRYB, BladWalidacji
 from .config import TRYB_NETTO, TRYBY
 from .hierarchia import liscie_pod, zbuduj_hierarchie
 from .stawki import KOLEJNOSC_STAWEK, do_decimal, normalizuj_stawke
-from .zestawy import (podsumowanie_stawek, rozwin, sumy_pozycji, wiersze_z_pozycji, wybierz_alternatywy)
+from .zestawy import (podsumowanie_stawek, rodzice as rodzice_hierarchii, rozwin, sumy_pozycji, wiersze_z_pozycji, wybierz_alternatywy)
 
 _NIE = frozenset({"nie", "false", "n", "no", "0", "f", "off"})
 
@@ -35,6 +35,76 @@ def grupa_alternatywy(alternatywa=None, grupa_opcji=None):
     return None if brak else ""
 
 
+TRYBY_OPCJI = ("brak", "opcja", "alternatywa")    # tryb pozycji najwyższego poziomu (pole `tryb_opcji`)
+WYBOR_OPCJI = ("auto", "jawny", "awaryjny")        # jak dokument rozstrzyga, co wchodzi do sumy
+_TAK = frozenset({"tak", "true", "t", "1", "y", "yes", "on", "prawda"})
+
+
+def _wartosc(p, pole):
+    return p.get(pole) if isinstance(p, Mapping) else getattr(p, pole, None)
+
+
+def _pusta(x):
+    return x is None or (isinstance(x, str) and not x.strip())
+
+
+def tryb_opcji_pozycji(x, pole="tryb_opcji"):
+    """"brak" | "opcja" | "alternatywa" albo None (nie podano: puste pole)."""
+    if _pusta(x):
+        return None
+    if not isinstance(x, str) or x.strip().lower() not in TRYBY_OPCJI:
+        raise BladWalidacji(NIEPOPRAWNY_TRYB, pole, "dozwolone: %s, jest %r" % (TRYBY_OPCJI, x))
+    return x.strip().lower()
+
+
+def wybrana_pozycji(x, pole="wybrana"):
+    """Pole `wybrana` jako bool; puste (None, "") to nie wybrana."""
+    if _pusta(x) or x is False:
+        return False
+    if x is True or (not isinstance(x, (bool, str)) and x == 1):
+        return True
+    if isinstance(x, str) and x.strip().lower() in _TAK:
+        return True
+    if _jawnie_nie(x):
+        return False
+    raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, pole, "oczekiwano tak/nie (true/false), jest %r" % (x,))
+
+
+def ustal_opcje(pozycje, rodzic, tryb_opcji=None):
+    """Które pozycje najwyższego poziomu są opcjonalne i co wchodzi do sumy.
+
+    `pozycje`: Pozycja albo słowniki; `rodzic`: {indeks: indeks rodzica} (pola opcji mają sens tylko na najwyższym
+    poziomie, u dzieci są ignorowane); `tryb_opcji`: "auto" (domyślnie: tryb jawny, gdy któraś pozycja najwyższego
+    poziomu ma `tryb_opcji`, inaczej awaryjny), "jawny" (zawsze), "awaryjny" (pola `tryb_opcji` / `wybrana`
+    ignorowane, obowiązuje `alternatywa` / `grupa_opcji` i dobór kombinacji do nagłówka).
+
+    Zwraca słownik: jawny (bool), alt {indeks: znacznik opcjonalności albo None} - grupa dla alternatywy, "" dla
+    opcji, tryby {indeks: "brak"|"opcja"|"alternatywa"} (tylko tryb jawny), wybrana {indeks: bool} (tylko opcja
+    i alternatywa), wlaczone (frozenset wybranych pozycji w trybie jawnym, w awaryjnym None)."""
+    wybor = "auto" if _pusta(tryb_opcji) else tryb_opcji
+    if wybor not in WYBOR_OPCJI:
+        raise BladWalidacji(NIEPOPRAWNY_TRYB, "tryb_opcji", "dozwolone: %s, jest %r" % (WYBOR_OPCJI, tryb_opcji))
+    gora = [i for i in range(len(pozycje)) if i not in rodzic]
+    surowe = {i: tryb_opcji_pozycji(_wartosc(pozycje[i], "tryb_opcji"), "pozycje[%d].tryb_opcji" % i) for i in gora}
+    jawny = wybor == "jawny" or (wybor == "auto" and any(t is not None for t in surowe.values()))
+    wynik = {"jawny": jawny, "alt": {i: None for i in range(len(pozycje))}, "tryby": {}, "wybrana": {},
+             "wlaczone": None}
+    if not jawny:
+        for i in gora:
+            wynik["alt"][i] = grupa_alternatywy(_wartosc(pozycje[i], "alternatywa"), _wartosc(pozycje[i], "grupa_opcji"))
+        return wynik
+    for i in gora:
+        tryb = surowe[i] or "brak"
+        wynik["tryby"][i] = tryb
+        if tryb == "brak":
+            continue
+        g = _wartosc(pozycje[i], "grupa_opcji")
+        wynik["alt"][i] = ("" if _pusta(g) else g) if tryb == "alternatywa" else ""
+        wynik["wybrana"][i] = wybrana_pozycji(_wartosc(pozycje[i], "wybrana"), "pozycje[%d].wybrana" % i)
+    wynik["wlaczone"] = frozenset(i for i, w in wynik["wybrana"].items() if w)
+    return wynik
+
+
 @dataclass(frozen=True)
 class Pozycja:
     """Wejściowa pozycja dokumentu.
@@ -56,6 +126,8 @@ class Pozycja:
     marza_proc: object = None        # alternatywnie marża %: sprzedaż = zakup / (1 - marża/100)
     alternatywa: object = None       # opcja wykluczająca się z innymi opcjami grupy (patrz zestawy.py)
     grupa_opcji: object = None       # nazwa grupy opcji (domyślnie jedna grupa dla wszystkich alternatyw)
+    tryb_opcji: object = None        # tryb jawny: "brak" | "opcja" | "alternatywa" (patrz ustal_opcje)
+    wybrana: object = None           # tryb jawny: czy opcja / alternatywa wchodzi do sumy
 
 
 def pozycja_z_slownika(d):
@@ -70,6 +142,7 @@ def pozycja_z_slownika(d):
         koszt_zakupu_jedn=d.get("koszt_zakupu_jedn"), id=d.get("id"), parent_id=d.get("parent_id"),
         cena_zakupu_jedn=d.get("cena_zakupu_jedn"), narzut_proc=d.get("narzut_proc"), marza_proc=d.get("marza_proc"),
         alternatywa=d.get("alternatywa"), grupa_opcji=d.get("grupa_opcji"),
+        tryb_opcji=d.get("tryb_opcji"), wybrana=d.get("wybrana"),
     )
 
 
@@ -86,7 +159,9 @@ class PozycjaWynik:
     id: object = None
     parent_id: object = None
     zestaw: bool = False  # wiersz zbiorczy pozycji nadrzędnej: N x suma dzieci, nie wchodzi do sum razem z dziećmi
-    alternatywa: object = None  # grupa opcji (wiersz najwyższego poziomu wzajemnie wykluczający się z resztą grupy)
+    alternatywa: object = None  # znacznik opcjonalności: grupa alternatyw ("" dla opcji w trybie jawnym) albo None
+    tryb_opcji: object = None   # tryb jawny: "brak" | "opcja" | "alternatywa" (None - dokument w trybie awaryjnym)
+    wybrana: object = None      # tryb jawny: czy opcja / alternatywa wchodzi do sumy (None dla "brak")
 
 
 @dataclass(frozen=True)
@@ -114,7 +189,8 @@ class DokumentWynik:
     # zestawu jest ignorowana (dawne zachowanie). Wybrane opcje: indeksy alternatyw, które weszły do sum.
     ilosc_zestawu: bool = False
     wlaczone_alternatywy: Tuple[int, ...] = ()
-    alternatywy: str = ""  # "", "brak" | "zgodne" | "najblizsze" - jak opcje dopasowano do nagłówka
+    alternatywy: str = ""  # "", "brak" | "zgodne" | "najblizsze" | "wybrane" | "jawne" - jak ustalono opcje
+    opcje_jawne: bool = False  # True: opcje i alternatywy wynikają z pól tryb_opcji / wybrana (bez doboru do nagłówka)
 
     def stawka(self, etykieta) -> Optional[PodsumowanieStawki]:
         for p in self.podsumowanie:
@@ -129,7 +205,8 @@ class DokumentWynik:
             "pozycje": [dict({"stawka_vat": p.stawka_vat, "ilosc": str(p.ilosc), "netto": str(p.netto),
                               "vat": str(p.vat), "brutto": str(p.brutto)},
                              **{k: v for k, v in (("id", p.id), ("parent_id", p.parent_id),
-                                                   ("alternatywa", p.alternatywa)) if v is not None})
+                                                   ("alternatywa", p.alternatywa), ("tryb_opcji", p.tryb_opcji),
+                                                   ("wybrana", p.wybrana)) if v is not None})
                         for p in self.pozycje],
             "podsumowanie": [{"stawka_vat": s.stawka_vat, "netto": str(s.netto), "vat": str(s.vat),
                               "brutto": str(s.brutto)} for s in self.podsumowanie],
@@ -169,7 +246,7 @@ def dokument_z_dokumentem(dok):
     return dokument_z_slownika(dok)
 
 
-def dokument_z_slownika(d, ilosc_zestawu=None):
+def dokument_z_slownika(d, ilosc_zestawu=None, tryb_opcji=None):
     """Buduje DokumentWynik z zewnętrznych danych bez przeliczania - do sprawdz_spojnosc/porownaj.
 
     Wymagane: pozycje[{stawka_vat, netto, vat, brutto}], suma_netto, suma_vat, suma_brutto.
@@ -179,6 +256,11 @@ def dokument_z_slownika(d, ilosc_zestawu=None):
 
     `ilosc_zestawu` (albo klucz "ilosc_zestawu" w słowniku; domyślnie False): True - ilość pozycji nadrzędnej
     mnoży sumę jej dzieci (dzieci opisują 1 szt. zestawu); False - ilość zestawu jest ignorowana.
+
+    Opcje: pozycje najwyższego poziomu z `tryb_opcji` ("brak" | "opcja" | "alternatywa"), `grupa_opcji`, `wybrana`
+    (tryb jawny: do sumy wchodzą pozycje "brak" oraz opcje i alternatywy z wybrana=true) albo - bez tych pól -
+    `alternatywa` / `grupa_opcji` z doborem kombinacji do nagłówka (tryb awaryjny). `tryb_opcji` (albo klucz
+    "tryb_opcji" w słowniku): "auto" (domyślnie) | "jawny" | "awaryjny", patrz ustal_opcje.
     """
     for pole in ("pozycje", "suma_netto", "suma_vat", "suma_brutto"):
         if pole not in d:
@@ -190,16 +272,17 @@ def dokument_z_slownika(d, ilosc_zestawu=None):
         if not isinstance(p, Mapping):
             raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, "pozycje[%d]" % i, "pozycja musi być słownikiem")
     dzieci = zbuduj_hierarchie([(p.get("id"), p.get("parent_id")) for p in surowe])
+    opcje = ustal_opcje(surowe, rodzice_hierarchii(dzieci), d.get("tryb_opcji") if tryb_opcji is None else tryb_opcji)
     pozycje = [None] * len(surowe)
 
     def pozycja(i, p, netto, vat, brutto, zestaw):
-        alt = grupa_alternatywy(p.get("alternatywa"), p.get("grupa_opcji")) if p.get("parent_id") is None else None
+        alt = opcje["alt"][i]
         return PozycjaWynik(
             indeks=i, ilosc=do_decimal(p.get("ilosc", 1), "pozycje[%d].ilosc" % i),
             cena_po_rabacie=Decimal(0), rabat_proc=Decimal(0),
             stawka_vat=normalizuj_stawke(p["stawka_vat"], "pozycje[%d].stawka_vat" % i),
             netto=netto, vat=vat, brutto=brutto, id=p.get("id"), parent_id=p.get("parent_id"), zestaw=zestaw,
-            alternatywa=alt)
+            alternatywa=alt, tryb_opcji=opcje["tryby"].get(i), wybrana=opcje["wybrana"].get(i))
 
     for i, p in enumerate(surowe):
         if i in dzieci:
@@ -231,7 +314,10 @@ def dokument_z_slownika(d, ilosc_zestawu=None):
                 "brutto": do_decimal(d["suma_brutto"], "suma_brutto")}
     wiersze = wiersze_z_pozycji(pozycje)
     rozw = rozwin(wiersze, dzieci, ilosc_zestawu)
-    wlaczone, alternatywy = wybierz_alternatywy(wiersze, dzieci, rozw, naglowek)
+    if opcje["jawny"]:
+        wlaczone, alternatywy = opcje["wlaczone"], "jawne"
+    else:
+        wlaczone, alternatywy = wybierz_alternatywy(wiersze, dzieci, rozw, naglowek)
     if d.get("podsumowanie") is not None:
         podsumowanie = tuple(
             PodsumowanieStawki(normalizuj_stawke(s["stawka_vat"], "podsumowanie.stawka_vat"),
@@ -249,4 +335,5 @@ def dokument_z_slownika(d, ilosc_zestawu=None):
         waluta=d.get("waluta", "PLN"), tryb=tryb, tryb_vat=d.get("tryb_vat", ""),
         pozycje=pozycje, podsumowanie=podsumowanie,
         suma_netto=naglowek["netto"], suma_vat=naglowek["vat"], suma_brutto=naglowek["brutto"],
-        ilosc_zestawu=bool(ilosc_zestawu), wlaczone_alternatywy=tuple(sorted(wlaczone)), alternatywy=alternatywy)
+        ilosc_zestawu=bool(ilosc_zestawu), wlaczone_alternatywy=tuple(sorted(wlaczone)), alternatywy=alternatywy,
+        opcje_jawne=opcje["jawny"])
