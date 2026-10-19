@@ -23,6 +23,7 @@ from decimal import Decimal, DecimalException
 from .adapter import id_dokumentu, scal_mapowanie, wczytaj_plik_json, z_wiersza
 from .bledy import NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, BladWalidacji
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
+from .formatowanie import format_bez_zer, format_kwoty
 from .model import dokument_z_slownika
 from .obliczenia import oblicz
 from .spojnosc import porownaj, sprawdz_spojnosc
@@ -129,7 +130,7 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None):
 
 
 def _gr(kwota):
-    return "%s (%s gr)" % (format(kwota, "f"), format((kwota * 100).normalize(), "f"))
+    return "%s (%s gr)" % (format_kwoty(kwota), format_bez_zer(kwota.scaleb(2)))
 
 
 def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
@@ -167,7 +168,7 @@ def tekst_podsumowania(podsumowanie, wyniki, max_przyklady=10):
 
 def _jako_json(x):
     if isinstance(x, Decimal):
-        return format(x, "f")
+        return format_kwoty(x)
     if isinstance(x, dict):
         return {k: _jako_json(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
