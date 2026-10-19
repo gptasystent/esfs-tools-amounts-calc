@@ -7,8 +7,9 @@ from decimal import Decimal, localcontext
 
 from .bledy import (NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI,
                     SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU,
-                    VAT_STAWKI_ROZNY_OD_SUMY)
+                    VAT_STAWKI_ROZNY_OD_SUMY, ZESTAW_ROZNY_OD_DZIECI)
 from .config import DOMYSLNA, KONTEKST, TRYB_BRUTTO, VAT_PER_STAWKA
+from .hierarchia import liscie_pod, zbuduj_hierarchie
 from .model import dokument_z_dokumentem, podsumuj_stawki
 from .stawki import wartosc_stawki
 
@@ -38,6 +39,8 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA):
       NETTO_PLUS_VAT_ROZNE_OD_BRUTTO        netto + vat != brutto (pozycja, stawka, dokument)
       PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI  wiersz podsumowania stawki != suma jej pozycji
       SUMA_STAWEK_ROZNA_OD_DOKUMENTU        suma wierszy podsumowania != suma dokumentu
+      ZESTAW_ROZNY_OD_DZIECI                kwoty pozycji nadrzędnej != suma jej dzieci
+                                            (pozycje nadrzędne nie wchodzą do sum dokumentu)
       VAT_STAWKI_ROZNY_OD_SUMY              VAT stawki != VAT policzony z sumy stawki
                                             (tylko dla tryb_vat == per_stawka; domyślnie
                                             bierze tryb_vat dokumentu, a gdy nieznany - pomija)
@@ -65,11 +68,22 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA):
         # suma pozycji == suma dokumentu
         z_pozycji = podsumuj_stawki(dok.pozycje)
         for pole in _POLA_KWOT:
-            suma = sum((getattr(p, pole) for p in dok.pozycje), Decimal(0))
+            suma = sum((getattr(p, pole) for p in dok.pozycje if not p.zestaw), Decimal(0))
             jest = getattr(dok, "suma_" + pole)
             if suma != jest:
                 wyniki.append(_wpis(SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, "dokument", "suma_" + pole, suma, jest,
                                     "suma pozycji != suma dokumentu"))
+
+        # pozycja nadrzędna (zestaw) == suma dzieci
+        dzieci = zbuduj_hierarchie([(p.id, p.parent_id) for p in dok.pozycje])
+        for i in sorted(dzieci):
+            potomne = [dok.pozycje[j] for j in liscie_pod(i, dzieci)]
+            for pole in _POLA_KWOT:
+                oczek = sum((getattr(p, pole) for p in potomne), Decimal(0))
+                jest = getattr(dok.pozycje[i], pole)
+                if oczek != jest:
+                    wyniki.append(_wpis(ZESTAW_ROZNY_OD_DZIECI, "pozycja:%d" % i, pole, oczek, jest,
+                                        "kwota pozycji nadrzędnej != suma jej dzieci"))
 
         # podsumowanie stawek vs pozycje i vs dokument
         wiersze = {s.stawka_vat: s for s in dok.podsumowanie}

@@ -32,6 +32,8 @@ MAPOWANIE_DOMYSLNE = {
     "rabat_dokumentu_proc": ["rabat_dokumentu_proc", "rabat_dokumentu"],
     "podsumowanie": ["podsumowanie", "vat_wg_stawek"],
     "pozycja": {
+        "id": ["id", "id_pozycji", "pozycja_id"],
+        "parent_id": ["parent_id", "id_nadrzednej", "nadrzedna_id"],
         "ilosc": ["ilosc", "qty", "liczba_sztuk"],
         "cena_netto_jedn": ["cena_netto_jedn", "cena_netto"],
         "cena_brutto_jedn": ["cena_brutto_jedn", "cena_brutto"],
