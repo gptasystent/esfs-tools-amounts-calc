@@ -1,7 +1,8 @@
 """Skaner kodu aplikacji: miejsca, które liczą kwoty po swojemu zamiast wspólną funkcją.
 
     python -m amounts_calc.skan_kodu SCIEZKA [SCIEZKA...] [--json w.json] [--csv w.csv]
-        [--zrodlo-prawdy funkcje.txt] [--pomin GLOB] [--waznosc wysoka|srednia|niska]
+        [--zrodlo-prawdy funkcje.txt] [--pomin GLOB] [--tryb pelny|istotne]
+        [--waznosc wysoka|srednia|niska]
 
 Zasada, której pilnuje skaner: kwoty pozycji liczy JEDNA wspólna funkcja (domyślnie `kwoty_pozycji(wartosc_netto,
 mnoznik_vat) -> (netto, vat, brutto)`): netto do grosza, VAT = round(netto * stawka / 100, 2) w ROUND_HALF_UP, brutto =
@@ -93,7 +94,10 @@ MAKS_ROZMIAR_PLIKU = 1_500_000
 MAKS_FRAGMENT = 160
 _MARKER = re.compile(r"kwoty-ok\s*:", re.I)
 
-Znalezisko = namedtuple("Znalezisko", "plik linia kod waznosc fragment podpowiedz")
+# `waznosc` to ważność jak dotąd (tryb pełny); `po_odszumieniu` - ważność po odszumieniu (None = szum, pomijane w trybie
+# "istotne"); tryb "istotne" zostawia znaleziska o ważności wysokiej i średniej po odszumieniu.
+Znalezisko = namedtuple("Znalezisko", "plik linia kod waznosc fragment podpowiedz po_odszumieniu", defaults=(None,))
+TRYBY = ("pelny", "istotne")
 
 
 # ---------------------------------------------------------------- leksyka: komentarze i teksty
@@ -323,6 +327,65 @@ def instrukcje(linie, jezyk):
         wynik.append((start, i))
         i += 1
     return wynik
+
+
+# ---------------------------------------------------------------- odszumianie (tryb "istotne")
+
+_OP_PRZED = re.compile(r"""[\w)\]'"]\s*[*/+\-]\s*$""")
+_OP_PO = re.compile(r"\s*[*/+\-]\s*[\w(]")
+_ARYTMETYKA_OPERANDY = re.compile(r"[\w)\]]\s*[*/+\-]\s*[\w(\[]")
+_TOKENY_ISTOTNE = frozenset({"netto", "brutto", "vat", "stawka", "stawki", "wartosc"})   # round(): kontekst pieniędzy
+_TOKENY_ARYTMETYKI = frozenset({"netto", "brutto", "vat"})                               # ciało funkcji: działania na...
+_FORMATER = re.compile(r"^(?:fmt|format|render|display|show|print|to_?string|pretty|humanize)", re.I)
+
+
+def _po_float(linia, waznosc):
+    """float() w linii Pythona: ważność po odszumieniu. Istotny tylko float użyty w działaniu z drugą kwotą / stawką
+    (mnożenie, dzielenie, dodawanie, odejmowanie) albo zapisywany do pola kwotowego po obliczeniu; sam odczyt,
+    konwersja, abs(float(x)), formatowanie i JSON to szum (None). Domyślnie "niska"; "srednia", gdy mnożony/dzielony
+    przez stawkę lub VAT."""
+    if not _PY_FLOAT.search(linia):
+        return None if _PY_DEF_FLOAT.match(linia) else waznosc        # SQL w tekście Pythona zostaje bez zmian
+    wynik = None
+    for m in _PY_FLOAT.finditer(linia):
+        przed = linia[:m.start()]
+        koniec = _argumenty(linia, m.end() - 1)[1]
+        po = linia[koniec + 1:]
+        if not (_OP_PRZED.search(przed) or _OP_PO.match(po)):
+            continue
+        reszta = przed + " " + po
+        if not (ma_kwote(reszta) or _STAWKA_W_LINII.search(reszta)):
+            continue
+        if _STAWKA_W_LINII.search(linia) and re.search(r"[*/]", _TEKST_JEDNOLINIOWY.sub('""', linia)):
+            return SREDNIA        # mnożenie / dzielenie w wyrażeniu ze stawką lub VAT
+        wynik = NISKA
+    return wynik
+
+
+def _kontekst_pieniedzy(p, linia):
+    """Słowa netto/brutto/vat/stawka/wartosc w tej linii albo w sąsiednich 2 liniach (po tokenach identyfikatorów)."""
+    tekst = " ".join(p.linie[max(0, linia - 2):linia + 3])
+    return any(tokeny(i) & _TOKENY_ISTOTNE for i in _IDENT.findall(tekst))
+
+
+def _funkcja_istotna(p, nr, nazwa):
+    """Ważność po odszumieniu dla FUNKCJA_POZA_ZRODLEM_PRAWDY: "srednia", gdy ciało robi działania arytmetyczne na
+    netto/brutto/vat; None dla formaterów (fmt*, format*, render*), komponentów React (nazwa wielką literą) i funkcji
+    bez takich działań (samo wyświetlanie, toLocaleString, Intl, JSX)."""
+    if _FORMATER.match(nazwa) or (p.jezyk == "ts" and nazwa[:1].isupper()):
+        return None
+    if p.jezyk == "sql":
+        koniec = nr
+        while koniec + 1 < len(p.linie) and koniec - nr < 80 and not re.match(r"\s*CREATE\b", p.linie[koniec + 1], re.I):
+            koniec += 1
+    else:
+        koniec = _zakres_ciala(p, nr)
+    for l in range(nr, koniec + 1):
+        linia = p.linie[l]
+        if any(tokeny(i) & _TOKENY_ARYTMETYKI for i in _IDENT.findall(linia)) \
+                and _ARYTMETYKA_OPERANDY.search(_TEKST_JEDNOLINIOWY.sub('""', linia)):
+            return SREDNIA
+    return None
 
 
 # ---------------------------------------------------------------- reguły
@@ -651,6 +714,7 @@ def skanuj_tekst(tekst, sciezka, jezyk, zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
                     regula(p, tekst_sql, nr_linii + s)
     # definicje funkcji (7.) i ciała źródeł prawdy
     wylaczone_ciala = set()
+    po_funkcji = {}
     for nr, nazwa in definicje(p):
         norm = _norm(nazwa)
         if norm in zrodlo:
@@ -659,6 +723,7 @@ def skanuj_tekst(tekst, sciezka, jezyk, zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
             continue
         if (tokeny(nazwa) & _TOKENY_FUNKCJI) and not nazwa.lower().startswith("test") and not nazwa.startswith("__"):
             p.dodaj(nr, FUNKCJA_POZA_ZRODLEM_PRAWDY)
+            po_funkcji[nr] = _funkcja_istotna(p, nr, nazwa)
     z_markerem = {l for l, t in p.komentarze.items() if _MARKER.search(t)}    # linie z komentarzem kwoty-ok
     instr_linii = {}
     for start, koniec in instr:
@@ -676,7 +741,15 @@ def skanuj_tekst(tekst, sciezka, jezyk, zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
         fragment = " ".join(p.oryginal[linia].split())
         if len(fragment) > MAKS_FRAGMENT:
             fragment = fragment[:MAKS_FRAGMENT - 1] + "…"
-        wynik.append(Znalezisko(sciezka, linia + 1, kod, waznosc, fragment, KODY[kod][2]))
+        if kod == FUNKCJA_POZA_ZRODLEM_PRAWDY:
+            po = po_funkcji.get(linia)
+        elif kod == FLOAT_W_FUNKCJI_KWOTOWEJ and jezyk == "py":
+            po = _po_float(p.linie[linia], waznosc)
+        elif kod == ROUND_PYTHON_BANKOWE:
+            po = waznosc if _kontekst_pieniedzy(p, linia) else NISKA
+        else:
+            po = waznosc
+        wynik.append(Znalezisko(sciezka, linia + 1, kod, waznosc, fragment, KODY[kod][2], po))
     return wynik
 
 
@@ -727,10 +800,22 @@ def modul(rel):
     return kat or "(korzeń)"
 
 
-def skanuj(sciezki, pomin=(), zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
-    """Skanuje pliki i katalogi. Zwraca (znaleziska, statystyki); znaleziska mają ścieżkę względną w polu `plik`."""
+def _licz(znaleziska, waznosc):
+    return {"znalezisk": len(znaleziska),
+            "wg_waznosci": {w: sum(1 for z in znaleziska if waznosc(z) == w) for w in WAZNOSCI},
+            "wg_kodu": dict(sorted(Counter(z.kod for z in znaleziska).items(), key=lambda kv: (-kv[1], kv[0])))}
+
+
+def skanuj(sciezki, pomin=(), zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY, tryb="pelny"):
+    """Skanuje pliki i katalogi. Zwraca (znaleziska, statystyki); znaleziska mają ścieżkę względną w polu `plik`.
+
+    `tryb`: "pelny" (domyślnie w bibliotece) - wszystkie znaleziska z ważnością jak dotąd; "istotne" - tylko znaleziska,
+    które po odszumieniu mają ważność wysoką lub średnią (z ważnością po odszumieniu). Statystyki zawierają
+    `przed_odszumieniem` (wszystkie znaleziska, ważność jak dotąd) i `po_odszumieniu` (istotne) bez względu na tryb."""
+    if tryb not in TRYBY:
+        raise ValueError("tryb: %s" % (TRYBY,))
     pliki, pominiete = zbierz_pliki(sciezki, pomin)
-    znaleziska, bledy_odczytu = [], 0
+    wszystkie, bledy_odczytu = [], 0
     for pelna, rel in pliki:
         try:
             with open(pelna, encoding="utf-8", errors="replace") as f:
@@ -739,8 +824,12 @@ def skanuj(sciezki, pomin=(), zrodlo_prawdy=DOMYSLNE_ZRODLO_PRAWDY):
             bledy_odczytu += 1
             continue
         jezyk = ROZSZERZENIA[os.path.splitext(pelna)[1].lower()]
-        znaleziska += skanuj_tekst(tekst.replace("\r\n", "\n").replace("\r", "\n"), rel, jezyk, zrodlo_prawdy)
-    return znaleziska, {"plikow": len(pliki), "pominietych": pominiete, "bledow_odczytu": bledy_odczytu}
+        wszystkie += skanuj_tekst(tekst.replace("\r\n", "\n").replace("\r", "\n"), rel, jezyk, zrodlo_prawdy)
+    istotne = [z._replace(waznosc=z.po_odszumieniu) for z in wszystkie if z.po_odszumieniu in (WYSOKA, SREDNIA)]
+    statystyki = {"plikow": len(pliki), "pominietych": pominiete, "bledow_odczytu": bledy_odczytu, "tryb": tryb,
+                  "przed_odszumieniem": _licz(wszystkie, lambda z: z.waznosc),
+                  "po_odszumieniu": _licz(istotne, lambda z: z.waznosc)}
+    return (istotne if tryb == "istotne" else wszystkie), statystyki
 
 
 # ---------------------------------------------------------------- raport
@@ -771,11 +860,24 @@ def zgrupowane(znaleziska):
 def tekst_raportu(znaleziska, statystyki):
     p = podsumowanie(znaleziska, statystyki)
     linie = ["Przeskanowano plików: %d (pominięto: %d), znalezisk: %d" % (p["plikow"], p["pominietych"], p["znalezisk"]),
-             "Ważność: " + ", ".join("%s=%d" % (w, n) for w, n in p["wg_waznosci"].items()), ""]
+             "Ważność: " + ", ".join("%s=%d" % (w, n) for w, n in p["wg_waznosci"].items())]
+    przed, po = statystyki.get("przed_odszumieniem"), statystyki.get("po_odszumieniu")
+    if przed and po:
+        linie.append("Odszumianie (--tryb %s): przed = %d (%s), po = %d (%s)" % (
+            statystyki.get("tryb", "pelny"), przed["znalezisk"],
+            ", ".join("%s=%d" % kv for kv in przed["wg_waznosci"].items()), po["znalezisk"],
+            ", ".join("%s=%d" % kv for kv in po["wg_waznosci"].items())))
+    linie.append("")
     if not znaleziska:
         return "\n".join(linie + ["Brak znalezisk."])
-    linie.append("Kody (liczba znalezisk):")
-    linie += ["  %-34s %d" % (k, n) for k, n in p["wg_kodu"].items()]
+    if przed and po:
+        kody = set(p["wg_kodu"]) | (set() if statystyki.get("filtr_waznosci") else set(przed["wg_kodu"]))
+        kody = sorted(kody, key=lambda k: (-przed["wg_kodu"].get(k, 0), k))
+        linie.append("Kody (po odszumieniu / przed odszumieniem):")
+        linie += ["  %-34s %d / %d" % (k, po["wg_kodu"].get(k, 0), przed["wg_kodu"].get(k, 0)) for k in kody]
+    else:
+        linie.append("Kody (liczba znalezisk):")
+        linie += ["  %-34s %d" % (k, n) for k, n in p["wg_kodu"].items()]
     for mod, lista in zgrupowane(znaleziska).items():
         linie += ["", "== %s (%d) ==" % (mod, len(lista))]
         linie += ["  %s:%d  %s [%s]  %s" % (z.plik, z.linia, z.kod, z.waznosc, z.fragment) for z in lista]
@@ -818,6 +920,9 @@ def _parser():
     p.add_argument("--pomin", action="append", default=[], metavar="GLOB",
                    help="wzorzec ścieżki (względnej) lub nazwy do pominięcia, np. 'tests/*' albo 'test_*.py'; "
                         "można powtarzać i łączyć przecinkami")
+    p.add_argument("--tryb", choices=TRYBY, default="istotne",
+                   help="istotne (domyślnie): tylko znaleziska wysokiej i średniej ważności po odszumieniu; "
+                        "pelny: wszystkie, z ważnością jak dotąd (podsumowanie pokazuje liczby przed i po)")
     p.add_argument("--waznosc", choices=WAZNOSCI, default=NISKA,
                    help="najniższa ważność w raporcie (domyślnie niska = wszystko)")
     return p
@@ -836,8 +941,9 @@ def main(argv=None):
         if args.zrodlo_prawdy:
             zrodlo = tuple(dict.fromkeys(DOMYSLNE_ZRODLO_PRAWDY + wczytaj_zrodlo_prawdy(args.zrodlo_prawdy)))
         pomin = [g.strip() for porcja in args.pomin for g in porcja.split(",") if g.strip()]
-        znaleziska, statystyki = skanuj(args.sciezki, pomin, zrodlo)
+        znaleziska, statystyki = skanuj(args.sciezki, pomin, zrodlo, args.tryb)
         znaleziska = [z for z in znaleziska if _RANGA[z.waznosc] <= _RANGA[args.waznosc]]
+        statystyki["filtr_waznosci"] = args.waznosc != NISKA
         if args.json_wyjscie:
             zapisz_json(args.json_wyjscie, znaleziska, statystyki)
         if args.csv_wyjscie:
