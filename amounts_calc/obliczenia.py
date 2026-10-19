@@ -9,6 +9,12 @@ PUNKTY ZAOKRĄGLANIA (kolejność, jedyne miejsca w których cokolwiek jest zaok
        od brutto: netto = brutto / (1+stawka/100) -> grosz, vat = brutto - netto (bez dryfu)
      robione per pozycja ALBO per stawka na sumie (Konfiguracja.tryb_vat).
 
+POZYCJE NADRZĘDNE (ZESTAWY): pozycja z `parent_id` jest dzieckiem pozycji o danym `id`. Pozycja,
+która ma dzieci, to wiersz zbiorczy: jej kwoty to suma dzieci, a sama NIE wchodzi do sum dokumentu
+ani do podsumowania stawek (brak podwójnego liczenia). Jej własne ilość/cena/rabat są ignorowane
+(wymagane są tylko `ilosc` i `stawka_vat`, żeby wiersz był poprawną pozycją). Rabat dokumentu i
+tryb VAT dotyczą liści.
+
 KOLEJNOŚĆ RABATÓW: najpierw rabat pozycji (na cenie jednostkowej), potem rabat dokumentu
 (procentowo na wartości każdej pozycji), na końcu VAT. Rabat dokumentu nie jest łączony z
 rabatem pozycji w jeden procent.
@@ -23,6 +29,7 @@ pozycjom wg malejącej części ułamkowej (remis: niższy indeks), aż suma sta
 from decimal import Decimal, localcontext
 
 from . import marza
+from .hierarchia import liscie_pod, zbuduj_hierarchie
 from .bledy import (BRAK_CENY, CENA_UJEMNA, ILOSC_UJEMNA, NARZUT_I_MARZA, NIEPOPRAWNA_WALUTA,
                     NIEPOPRAWNY_TRYB, RABAT_POZA_ZAKRESEM, BladWalidacji)
 from .config import (DOMYSLNA, KONTEKST, ROZKLADY, ROZKLAD_NAJWIEKSZA, TRYB_BRUTTO, TRYB_NETTO,
@@ -129,9 +136,12 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
     with localcontext(KONTEKST):
         rabat_dok = _rabat(rabat_dokumentu_proc, "rabat_dokumentu_proc")
         wejscia = [pozycja_z_slownika(p) for p in pozycje]
+        dzieci = zbuduj_hierarchie([(w.id, w.parent_id) for w in wejscia])
+        liscie = [i for i in range(len(wejscia)) if i not in dzieci]  # tylko liście wchodzą do sum
 
         ilosci, ceny_po, rabaty, stawki, kwoty = [], [], [], [], []
-        for i, p in enumerate(wejscia):
+        for i in liscie:
+            p = wejscia[i]
             ilosc, cena, rabat, stawka = _wejscie_pozycji(i, p, tryb, narzut_proc, marza_proc, konf)
             cena_po = konf.cena(cena * (1 - rabat / _100))                 # punkt 1
             wartosc = konf.kwota(ilosc * cena_po)                           # punkt 2
@@ -171,10 +181,25 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
                 else:                       # poprawiamy netto, vat = brutto - netto
                     netto[i], vat[i] = wartosc, brutto[i] - wartosc
 
-        wyniki = tuple(PozycjaWynik(
-            indeks=i, ilosc=ilosci[i], cena_po_rabacie=ceny_po[i], rabat_proc=rabaty[i],
-            stawka_vat=stawki[i], netto=netto[i], vat=vat[i], brutto=brutto[i])
-            for i in range(len(wejscia)))
+        wyniki_lisci = {}
+        for j, i in enumerate(liscie):
+            w = wejscia[i]
+            wyniki_lisci[i] = PozycjaWynik(
+                indeks=i, ilosc=ilosci[j], cena_po_rabacie=ceny_po[j], rabat_proc=rabaty[j],
+                stawka_vat=stawki[j], netto=netto[j], vat=vat[j], brutto=brutto[j], id=w.id, parent_id=w.parent_id)
+        wyniki = []
+        for i, w in enumerate(wejscia):
+            if i in wyniki_lisci:
+                wyniki.append(wyniki_lisci[i])
+                continue
+            # pozycja nadrzędna (zestaw): suma liści pod nią; nie wchodzi do sum dokumentu
+            potomne = [wyniki_lisci[j] for j in liscie_pod(i, dzieci)]
+            wyniki.append(PozycjaWynik(
+                indeks=i, ilosc=do_decimal(w.ilosc, "pozycje[%d].ilosc" % i), cena_po_rabacie=Decimal(0),
+                rabat_proc=Decimal(0), stawka_vat=normalizuj_stawke(w.stawka_vat, "pozycje[%d].stawka_vat" % i),
+                netto=sum((x.netto for x in potomne), Decimal(0)), vat=sum((x.vat for x in potomne), Decimal(0)),
+                brutto=sum((x.brutto for x in potomne), Decimal(0)), id=w.id, parent_id=w.parent_id, zestaw=True))
+        wyniki = tuple(wyniki)
         podsumowanie = podsumuj_stawki(wyniki)
         return DokumentWynik(
             waluta=waluta, tryb=tryb, tryb_vat=tryb_vat, pozycje=wyniki, podsumowanie=podsumowanie,

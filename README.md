@@ -43,7 +43,7 @@ Uruchamianie testów: `python -m unittest discover -s tests`.
 
 ## Implementacja
 
-Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (195 testów, kilka sekund,
+Pakiet `amounts_calc/` (tylko stdlib, Python 3.8+), testy w `tests/` (298 testów, kilka sekund,
 bez bazy danych i bez sieci).
 
 ```
@@ -55,7 +55,10 @@ amounts_calc/
   marza.py        narzut vs marża
   spojnosc.py     sprawdz_spojnosc(), porownaj()
   adapter.py      z_wiersza(): dowolne nazwy pól -> słownik dokumentu; wczytanie JSON jako Decimal
-  check.py        CLI: python -m amounts_calc.check (wsadowe sprawdzanie dokumentów)
+  check.py        CLI: python -m amounts_calc.check (wsadowe sprawdzanie dokumentów, JSON/CSV)
+  klasyfikacja.py POLGROSZ, NAGLOWEK_*, ILOSC_X_CENA... - przyczyny niespójności (czyste funkcje)
+  hierarchia.py   pozycje nadrzędne/podrzędne (zestawy): walidacja i liście pod pozycją
+  formatowanie.py kanoniczne wyświetlanie Decimal (bez ogona zer, bez zaokrąglania)
   bledy.py        BladWalidacji + kody błędów jako stałe
 tests/
   referencja.py   niezależna implementacja na fractions.Fraction (bez kodu biblioteki)
@@ -174,109 +177,207 @@ W dokumencie: pozycja z `koszt_zakupu_jedn` bez ceny + `oblicz(..., narzut_proc=
 
 ### Sprawdzanie dokumentów z bazy
 
-Cel: sprawdzić historyczne dokumenty bez wysyłania danych do repo. Eksportujesz je u siebie do
-pliku JSON, uruchamiasz CLI lokalnie i oglądasz tylko raport.
+Cel: sprawdzić historyczne dokumenty bez wysyłania danych do repo, a wynik dostać od razu w postaci
+nadającej się do decyzji (co jest błędem, co drobiazgiem, co niepełnymi danymi). Eksportujesz dokumenty
+u siebie do pliku JSON, uruchamiasz CLI lokalnie i oglądasz tylko raport.
 
 ```
 python -m amounts_calc.check dokumenty.json [--tryb-vat per_stawka|per_pozycja]
-       [--json wynik.json] [--max-przyklady N] [--mapowanie mapowanie.json]
+       [--pomin-typy KOREKTA,ROZ] [--json wynik.json] [--csv wynik.csv]
+       [--max-przyklady N] [--mapowanie mapowanie.json]
 ```
 
-**Wejście** - JSON: lista dokumentów (UTF-8, BOM dozwolony). Liczby ułamkowe są wczytywane jako
-`Decimal` (`parse_float=Decimal`, bez przechodzenia przez `float`); liczby mogą też być stringami,
-również z przecinkiem (`"12,50"`). `NaN`/`Infinity` w pliku to błąd wejścia.
+**Wejście** - JSON: lista dokumentów (UTF-8, BOM dozwolony, końce linii LF lub CRLF). Liczby ułamkowe są
+wczytywane jako `Decimal` (`parse_float=Decimal`, bez przechodzenia przez `float`); liczby mogą też być
+stringami, również z przecinkiem (`"12,50"`). `NaN`/`Infinity` w pliku to błąd wejścia.
 
 ```json
-[{"id": "FV/2024/0003",
+[{"id": "FV/2024/0003", "typ": "FV",
   "suma_netto": "100.00", "suma_vat": "23.00", "suma_brutto": "123.05",
   "pozycje": [{"ilosc": 4, "cena_netto_jedn": "25.00", "rabat_proc": 0, "stawka_vat": 23,
                "netto": "100.00", "vat": "23.00", "brutto": "123.00"}]}]
 ```
 
 Pola dokumentu: `id` (dowolna wartość JSON, przechodzi do wyniku bez zmian), `pozycje`, `suma_netto`,
-`suma_vat`, `suma_brutto`; opcjonalnie `tryb` (`netto` domyślnie albo `brutto` - wtedy pozycje niosą
-`cena_brutto_jedn`), `waluta`, `rabat_dokumentu_proc`, `podsumowanie` (zapisane sumy per stawka:
-`[{stawka_vat, netto, vat, brutto}]`). Pola pozycji: `ilosc`, `cena_netto_jedn` (lub
-`cena_brutto_jedn`), `rabat_proc`, `stawka_vat` oraz zapisane `netto`, `vat`, `brutto`. Gdy żadna
-pozycja nie ma zapisanych kwot, sprawdzane są tylko sumy dokumentu (`pominieto_pozycje: true`).
+`suma_vat`, `suma_brutto`; opcjonalnie `typ` (np. `FV`, `KOREKTA`, `ROZ`, `ZK`; nazwa pola konfigurowalna
+przez `--mapowanie`), `tryb` (`netto` domyślnie albo `brutto` - wtedy pozycje niosą `cena_brutto_jedn`),
+`waluta`, `rabat_dokumentu_proc`, `podsumowanie` (zapisane sumy per stawka: `[{stawka_vat, netto, vat,
+brutto}]`). Pola pozycji: `ilosc`, `cena_netto_jedn` (lub `cena_brutto_jedn`), `rabat_proc`, `stawka_vat`
+oraz zapisane `netto`, `vat`, `brutto`; opcjonalnie `id` i `parent_id` (zestawy, patrz niżej).
 
-**Co jest sprawdzane** - dla każdego dokumentu:
+**Co jest sprawdzane** - dla każdego dokumentu (poza pominiętymi typami):
 
 - (a) `sprawdz_spojnosc` na zapisanych danych (suma pozycji != suma dokumentu, netto+vat != brutto,
   VAT stawki != VAT z sumy - ten ostatni wg `--tryb-vat`, domyślnie `per_stawka`);
 - (b) `oblicz()` z pozycji w OBU trybach VAT i `porownaj()` z zapisanymi sumami. Tryb "pasuje", gdy
   zgadzają się sumy dokumentu i podsumowanie stawek; różnice na poziomie pozycji są tylko liczone
   (`liczba_roznic_pozycji`), bo korekta groszowa może legalnie trafić na inną pozycję w systemie
-  źródłowym. Wynik: `oba` / `per_stawka` / `per_pozycja` / `zaden`.
+  źródłowym. Wynik: `oba` / `per_stawka` / `per_pozycja` / `zaden`;
+- (c) klasyfikacja przyczyn (poniżej). Jeden dokument może mieć kilka przyczyn; każda to osobny kod.
 
-Błędny dokument (ujemna ilość, nieznana stawka, brak pola, śmieci zamiast liczby, element nie
-będący obiektem) nie przerywa całości - trafia do raportu z kodem błędu i etapem (`wejscie` albo
-`obliczenia`).
+Błędny dokument (ujemna ilość, nieznana stawka, brak pola, śmieci zamiast liczby, zła hierarchia pozycji,
+element nie będący obiektem) nie przerywa całości - trafia do raportu z kodem błędu i etapem (`wejscie`
+albo `obliczenia`).
 
-**Przykład** (dane fikcyjne, plik `dokumenty.json` z czterema dokumentami: spójny w stylu `per_stawka`,
-spójny w stylu `per_pozycja`, z błędną sumą brutto i z ujemną ilością):
+#### Kody przyczyn
+
+| Kod | Kiedy |
+|---|---|
+| `POLGROSZ` | różnica <= 0,01 i któraś z porównywanych wartości jest niezaokrąglona (więcej niż 2 miejsca po przecinku, np. brutto `1845.005`). Ten sam grosz przy wartościach zaokrąglonych **nie** jest półgroszem - to zwykła niespójność. |
+| `NAGLOWEK_ZERO` | wszystkie sumy nagłówka równe 0 przy niezerowych pozycjach |
+| `NAGLOWEK_NIZSZY` / `NAGLOWEK_WYZSZY` | nagłówek różni się od sumy pozycji o więcej niż 0,01 (porównanie: netto, potem brutto, potem VAT; pokazuje różnicę, różnice na pozostałych polach i `mozliwe_pozycje` - pozycje o wartości równej różnicy, np. pominiętą albo policzoną drugi raz) |
+| `ZESTAW_LICZONY_PODWOJNIE` | nagłówek = suma pozycji "liści" + kwoty pozycji nadrzędnych (zestawów) |
+| `ILOSC_X_CENA` | wartość pozycji (netto w trybie od netto, brutto w trybie od brutto) różni się od `ilość x cena po rabacie` (z rabatem pozycji i dokumentu) o więcej niż 0,01; wskazuje pozycje i różnice |
+| `BRAK_VAT_W_POZYCJACH` | wszystkie pozycje mają `netto`, a żadna pola VAT: **dane niepełne, nie błąd**. Liczone jest, co się da: netto (i brutto, jeśli jest) pozycji vs nagłówek, `ILOSC_X_CENA`, sumy nagłówka |
+| `NIEZGODNY_Z_BIBLIOTEKA` | żaden tryb VAT nie odtwarza zapisanych sum, a nic innego tego nie tłumaczy |
+
+Kody spójności z `sprawdz_spojnosc` (`SUMA_POZYCJI_ROZNA_OD_DOKUMENTU`, `NETTO_PLUS_VAT_ROZNE_OD_BRUTTO`,
+`VAT_STAWKI_ROZNY_OD_SUMY`, `PODSUMOWANIE_STAWKI_ROZNE_OD_POZYCJI`, `SUMA_STAWEK_ROZNA_OD_DOKUMENTU`,
+`ZESTAW_ROZNY_OD_DZIECI`) i kody błędów walidacji (np. `ILOSC_UJEMNA`, `BRAK_POLA`,
+`NIEPOPRAWNA_HIERARCHIA`) trafiają do tego samego rozkładu kodów.
+
+**Status dokumentu** (jeden, wg pierwszeństwa): `blad` > `niespojny` (jest niespójność inna niż POLGROSZ
+albo przyczyna z tabeli poza POLGROSZ i `BRAK_VAT_W_POZYCJACH`) > `niepelny` (tylko
+`BRAK_VAT_W_POZYCJACH`) > `drobiazg` (tylko `POLGROSZ`) > `spojny`; `pominiety` dla typów z `--pomin-typy`.
+Dokument z `BRAK_VAT_W_POZYCJACH` i prawdziwą niespójnością jest `niespojny`, a kod braku VAT zostaje
+na liście przyczyn.
+
+**Pomijanie typów i grupowanie.** Korekty i faktury rozliczeniowe mają z założenia sumy nagłówka różne od
+sumy pozycji. `--pomin-typy KOREKTA,ROZ` (wielkość liter bez znaczenia) wyłącza je ze sprawdzania w całości
+(nie są nawet parsowane, więc zepsute dane też nie przeszkadzają), a raport pokazuje je tylko jako liczbę
+pominiętych. Raport jest zawsze grupowany po typie: dla każdego typu liczba dokumentów oraz spójne /
+drobiazg / niepełne / niespójne / błędne / pominięte. Dokument bez typu trafia do grupy `(brak typu)`.
+
+**Pozycje nadrzędne i podrzędne (zestawy), ZK i oferty.** Pozycja z `parent_id` wskazującym `id` innej
+pozycji jest jej dzieckiem; pozycja mająca dzieci to wiersz zbiorczy: jej kwoty to suma dzieci i **nie
+wchodzą** do sum dokumentu ani do podsumowania stawek (inaczej zestaw "krzesło + 4 nogi" byłby liczony
+podwójnie). Zagnieżdżanie jest dozwolone, dzieci mogą mieć różne stawki VAT, a rabat dokumentu i VAT
+dotyczą liści. Zapisane kwoty pozycji nadrzędnej mogą być pominięte (zostaną uzupełnione sumą dzieci);
+jeśli są, muszą się zgadzać z sumą dzieci (`ZESTAW_ROZNY_OD_DZIECI`). Zła hierarchia (nieznany
+`parent_id`, cykl, zdublowane `id` rodzica) to błąd `NIEPOPRAWNA_HIERARCHIA`. W `oblicz()` te same pola:
+`{"id": "Z1", "ilosc": 1, "stawka_vat": 23}` (wiersz nadrzędny; własna cena i rabat są ignorowane) i dzieci
+`{"parent_id": "Z1", ...}`.
+
+**Przykład** (dane fikcyjne; plik `dokumenty.json`: spójna faktura, faktura z niezaokrąglonym brutto
+`1845.005`, faktura bez pola VAT w pozycjach, trzy faktury z różnymi błędami, korekta, faktura
+rozliczeniowa i ZK z zestawem policzonym drugi raz):
 
 ```
-$ python -m amounts_calc.check dokumenty.json --json problemy.json --max-przyklady 3
-Sprawdzono dokumentów: 4
-  spójnych (bez niespójności i błędów): 1
-  z niespójnością zapisanych sum:       2
-  z błędem (walidacja/struktura):       1
-  z problemem (w tym brak zgodności z biblioteką): 3
+$ python -m amounts_calc.check dokumenty.json --pomin-typy KOREKTA,ROZ --json problemy.json --csv problemy.csv --max-przyklady 4
+Do sprawdzenia: 4 (niespójne: 4, błędne: 0)
+Tylko drobiazgi (POLGROSZ): 1
+Niepełne dane (brak VAT w pozycjach): 1
+Pominięte typy (KOREKTA, ROZ): 2
+Bez uwag: 1 z 9 dokumentów
+
+Sprawdzono dokumentów: 9 (w tym pominięto: 2)
+  spójnych (bez przyczyn):              1
+  z niespójnością zapisanych sum:       4
+  z błędem (walidacja/struktura):       0
+  w raporcie (JSON/CSV): 6
 
 Rozkład kodów (liczba dokumentów):
-  ILOSC_UJEMNA                             1
+  SUMA_POZYCJI_ROZNA_OD_DOKUMENTU          4
+  SUMA_STAWEK_ROZNA_OD_DOKUMENTU           4
+  BRAK_VAT_W_POZYCJACH                     1
+  ILOSC_X_CENA                             1
+  NAGLOWEK_NIZSZY                          1
+  NAGLOWEK_WYZSZY                          1
+  NAGLOWEK_ZERO                            1
   NETTO_PLUS_VAT_ROZNE_OD_BRUTTO           1
-  SUMA_POZYCJI_ROZNA_OD_DOKUMENTU          1
-  SUMA_STAWEK_ROZNA_OD_DOKUMENTU           1
-  VAT_STAWKI_ROZNY_OD_SUMY                 1
+  POLGROSZ                                 1
+  ZESTAW_LICZONY_PODWOJNIE                 1
 
-Zgodność zapisanych sum z biblioteką (dokumenty bez błędu: 3):
-  pasuje per_stawka:  1
-  pasuje per_pozycja: 1
-  rozkład: oba=0, tylko per_stawka=1, tylko per_pozycja=1, żaden=1
+Zgodność zapisanych sum z biblioteką (dokumenty bez błędu: 7):
+  pasuje per_stawka:  2
+  pasuje per_pozycja: 2
+  rozkład: oba=2, tylko per_stawka=0, tylko per_pozycja=0, żaden=5
 
-Największe rozbieżności (2 z 2):
-  1. id=FV/2024/0003 (indeks 2): 0.05 (5 gr) - NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU
-  2. id=FV/2024/0002 (indeks 1): 0.01 (1 gr) - VAT_STAWKI_ROZNY_OD_SUMY
+Wg typu dokumentu:
+  typ      dokumentów  spójne  drobiazg  niepełne  niespójne  błędne  pominięte
+  FV                6       1         1         1          3       0          0
+  KOREKTA           1       0         0         0          0       0          1
+  ROZ               1       0         0         0          0       0          1
+  ZK                1       0         0         0          1       0          0
+
+Największe rozbieżności (4 z 4):
+  1. id=ZK/1 (indeks 8): 163.89 (16389 gr) - NAGLOWEK_WYZSZY, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU, ZESTAW_LICZONY_PODWOJNIE
+  2. id=FV/4 (indeks 3): 98.40 (9840 gr) - NAGLOWEK_ZERO, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU
+  3. id=FV/6 (indeks 5): 36.90 (3690 gr) - ILOSC_X_CENA
+  4. id=FV/5 (indeks 4): 12.30 (1230 gr) - NAGLOWEK_NIZSZY, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU
 ```
 
-Kody w tabeli to liczba dokumentów, w których kod wystąpił. Pierwszy dokument (zapisany w stylu
-`per_stawka`) jest w pełni zgodny; drugi (VAT zaokrąglany po pozycjach: 3 x 0,08 = 0,24) pasuje do
-`per_pozycja`, a przy domyślnym `--tryb-vat per_stawka` ma niespójność o 1 gr. Przy
-`--tryb-vat per_pozycja` ta niespójność znika.
+Dokument `FV/5` ma nagłówek 80,00 netto przy pozycjach 80,00 + 10,00; w `problemy.json` jego przyczyna
+wygląda tak (`mozliwe_pozycje` wskazuje pominiętą pozycję o wartości 10,00):
 
-**Wyjście JSON** (`--json wynik.json`, UTF-8, LF): lista TYLKO dokumentów z problemem (błąd,
-niespójność albo `zaden` tryb nie pasuje). Wpis: `indeks` (pozycja w pliku), `id` (bez zmian),
-`blad` (`{kod, pole, etap, wiadomosc}` albo `null`), `niespojnosci` (lista słowników z
-`sprawdz_spojnosc`: `kod, zakres, pole, oczekiwano, jest, roznica, opis`), `pasuje`
-(`{per_stawka, per_pozycja}`), `tryb_pasujacy`, `rozbieznosci` (per tryb VAT lista
-`{pole, zapisane, biblioteka, roznica}`; `roznica` = biblioteka - zapisane), `liczba_roznic_pozycji`,
-`max_roznica`, `pominieto_pozycje`. Kwoty są stringami (bez utraty precyzji).
+```json
+{"kod": "NAGLOWEK_NIZSZY", "roznica": "-10.00", "pole": "suma_netto", "zrodlo_pozycji": "zapisane",
+ "roznice_pol": {"suma_netto": "-10.00", "suma_vat": "-2.30", "suma_brutto": "-12.30"},
+ "mozliwe_pozycje": [{"indeks": 1, "id": null, "pole": "netto", "wartosc": "10.00", "zestaw": false}],
+ "opis": "nagłówek niższy od sumy pozycji o więcej niż 0,01 (netto)"}
+```
 
-**Kod wyjścia:** 0 - wszystko w porządku, 1 - znaleziono problemy, 2 - błąd wejścia (brak pliku,
-zły JSON, wejście nie jest listą, złe mapowanie, `NaN` w pliku).
+**Wyjście tekstowe** zaczyna się od dokładnie 5 linii "co jest do zrobienia": ile dokumentów wymaga
+uwagi (niespójne + błędne; bez drobiazgów i bez pominiętych typów), ile ma tylko `POLGROSZ`, ile ma
+niepełne dane (tylko `BRAK_VAT_W_POZYCJACH`), ile pominięto (z listą typów) i ile jest bez uwag. Statusy
+są rozłączne, więc te liczby sumują się do liczby dokumentów. Dalej: rozkład kodów (liczba dokumentów,
+w których kod wystąpił), zgodność z trybami VAT, tabela wg typu i największe rozbieżności (bez drobiazgów
+i pominiętych; `--max-przyklady` ogranicza długość listy).
+
+**Wyjście JSON** (`--json wynik.json`, UTF-8, LF): lista dokumentów z problemem, czyli o statusie `blad`,
+`niespojny`, `niepelny` albo `drobiazg` (spójne i pominięte nie są listowane). Wpis: `indeks` (pozycja
+w pliku), `id` (bez zmian), `typ` (zawsze tekst), `status`, `dane` (`pelne` / `brak_kwot` / `brak_vat`),
+`blad` (`{kod, pole, etap, wiadomosc}` albo `null`), `niespojnosci` (lista z `sprawdz_spojnosc`: `kod, zakres,
+pole, oczekiwano, jest, roznica, opis`; wpisy będące półgroszem mają `drobiazg: true`), `przyczyny` (kody
+z tabeli wyżej ze szczegółami), `pasuje` (`{per_stawka, per_pozycja}`), `tryb_pasujacy`, `rozbieznosci` (per
+tryb VAT lista `{pole, zapisane, biblioteka, roznica}`; `roznica` = biblioteka - zapisane),
+`liczba_roznic_pozycji`, `max_roznica`, `pominieto_pozycje`. Kwoty są stringami w postaci kanonicznej.
+
+**Wyświetlanie liczb.** W raporcie tekstowym i JSON kwoty są normalizowane bez zbędnych zer na końcu, ale
+z zachowaniem znaczących miejsc i co najmniej dwóch miejsc po przecinku: `140220.000000000000000000000` ->
+`140220.00`, `1758.285000000000000000000` -> `1758.285`, `0E-10` -> `0.00`. Nic nie jest zaokrąglane.
+Wyjątek: `id` przechodzi bez zmian (liczba z ułamkiem w `id` jest zapisywana tak, jak była w pliku).
+
+**CSV** (`--csv wynik.csv`): jedna linia na dokument z problemem (te same dokumenty co w JSON), kolumny
+`indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje`. Separator `;`, kodowanie UTF-8 **z BOM**,
+końce linii CRLF i przecinek dziesiętny w kwotach (`98,40`), żeby polski Excel otworzył plik dwuklikiem
+bez kreatora importu. `kody` to wszystkie kody dokumentu oddzielone przecinkami, `tryb_vat_pasuje` to
+`oba` / `per_stawka` / `per_pozycja` / `zaden` (puste dla dokumentu z błędem). Wartości tekstowe
+zaczynające się od `=`, `+`, `@` lub `-` (przed nie-cyfrą) dostają apostrof, żeby arkusz nie wykonał ich
+jako formuły.
+
+```
+indeks;id;typ;status;kody;najwieksza_roznica;tryb_vat_pasuje
+1;FV/2;FV;drobiazg;NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, POLGROSZ, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;0,005;zaden
+2;FV/3;FV;niepelny;BRAK_VAT_W_POZYCJACH;0,00;oba
+3;FV/4;FV;niespojny;NAGLOWEK_ZERO, SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, SUMA_STAWEK_ROZNA_OD_DOKUMENTU;98,40;zaden
+```
+
+**Kod wyjścia:** 0 - nic nie wymaga uwagi (drobiazgi, dane niepełne i pominięte typy nie liczą się),
+1 - są dokumenty niespójne lub błędne, 2 - błąd wejścia (brak pliku, zły JSON, wejście nie jest listą,
+złe mapowanie, `NaN` w pliku, błąd zapisu pliku wyjściowego).
 
 **Dopasowanie do dowolnego schematu - `--mapowanie`.** Plik JSON wskazuje, pod jakimi nazwami szukać
 pól kanonicznych (nazwa albo lista nazw; ścieżka z kropką schodzi w zagnieżdżone obiekty). Nazwy z
-mapowania mają pierwszeństwo przed domyślnymi (`netto`, `kwota_vat`, `brutto`, `linie`, `qty`...,
-pełna lista w `amounts_calc/adapter.py`); nieznany klucz to błąd, żeby literówka nie zadziałała po cichu.
+mapowania mają pierwszeństwo przed domyślnymi (`netto`, `kwota_vat`, `brutto`, `linie`, `qty`,
+`typ`/`typ_dokumentu`/`rodzaj`...; pełna lista w `amounts_calc/adapter.py`); nieznany klucz to błąd, żeby
+literówka nie zadziałała po cichu. Wartość `null` w danych jest traktowana jak brak pola.
 
 ```json
-{"id": "nr_dok",
+{"id": "nr_dok", "typ": "kod_rodzaju",
  "suma_netto": "kwota_netto", "suma_vat": ["podatek", "kwota_vat"], "suma_brutto": "razem",
  "pozycje": "wiersze",
- "pozycja": {"ilosc": "szt", "cena_netto_jedn": "cena", "stawka_vat": "stawka_proc",
-             "netto": "wart_n", "vat": "wart_v", "brutto": "wart_b"}}
+ "pozycja": {"id": "nr_wiersza", "parent_id": "nr_nadrzednego", "ilosc": "szt", "cena_netto_jedn": "cena",
+             "stawka_vat": "stawka_proc", "netto": "wart_n", "vat": "wart_v", "brutto": "wart_b"}}
 ```
 
 W kodzie ten sam mechanizm to `z_wiersza(wiersz, mapowanie=None, pozycje=None)`, np. gdy pozycje
 pobierasz osobnym zapytaniem: `z_wiersza(naglowek, mapowanie, pozycje=lista_wierszy_pozycji)`.
 Wynik można podać do `sprawdz_spojnosc`, `porownaj` i `oblicz`.
 
-Zalecany tryb pracy: eksport próbki (np. ostatni miesiąc) do JSON -> CLI lokalnie -> z raportu
-bierzesz rozkład kodów i `max_roznica`, a `id` dokumentów z problemami sprawdzasz już w aplikacji.
-Raportu z prawdziwymi `id` nie wkładaj do repo.
+Zalecany tryb pracy: eksport próbki (np. ostatni miesiąc) do JSON -> CLI lokalnie z `--pomin-typy` ->
+z pierwszych 5 linii widać, ile jest do zrobienia, z `--csv` pracujesz w Excelu po `status` i `kody`, a `id`
+dokumentów z problemami sprawdzasz już w aplikacji. Raportu z prawdziwymi `id` nie wkładaj do repo.
 
 ### Integracja z istniejącą aplikacją
 
@@ -335,3 +436,17 @@ biblioteki), a `tests/test_referencja.py` porównuje ją z biblioteką na 2000 l
    rozdziału groszy, można dodać ją jako kolejny wariant porównania.
 6. **Precyzja ceny jednostkowej:** cena po rabacie jest zaokrąglana do 4 miejsc zawsze (też bez
    rabatu), więc cena wejściowa z 5+ miejscami zostanie zaokrąglona - do potwierdzenia.
+7. **Model zestawów:** przyjęto, że pozycja nadrzędna jest wierszem zbiorczym (jej kwoty = suma dzieci,
+   własna cena ignorowana). Odwrotny model - nadrzędna niesie cenę zestawu, a dzieci są tylko opisowe -
+   nie jest obsługiwany; trzeba potwierdzić na prawdziwych ZK/ofertach, który występuje.
+8. **Definicja `POLGROSZ`:** różnica <= 0,01 oraz niezaokrąglona (> 2 miejsca) wartość po którejś stronie.
+   Progi `0,01` dla `NAGLOWEK_*` i `ILOSC_X_CENA` to stała `PROG` w `klasyfikacja.py`.
+   `ILOSC_X_CENA` używa reguł rabatu i zaokrąglenia tej biblioteki (cena po rabacie do 4 miejsc, potem
+   wartość do grosza) - system źródłowy zaokrąglający inaczej może dawać fałszywe trafienia.
+9. **Dane niepełne:** jako niepełne traktowany jest tylko brak pola VAT we wszystkich pozycjach. Brak
+   `brutto` przy obecnych `netto` i `vat` nadal kończy się `BRAK_POLA` (można by wyliczać brutto z
+   netto + vat); dokument, w którym tylko część pozycji ma kwoty, jest błędem, nie "niepełnym".
+10. **CSV pod polski Excel:** `;`, BOM, CRLF i przecinek dziesiętny. Dla Excela w innej lokalizacji
+    (separator `,`, kropka dziesiętna) trzeba to zmienić albo użyć JSON.
+11. **Kod wyjścia 1** tylko dla dokumentów niespójnych i błędnych; drobiazgi i dane niepełne dają 0.
+    Jeśli CI ma być surowsze, wystarczy sprawdzić statusy w JSON.

@@ -1,7 +1,7 @@
 """Adapter: dowolny schemat (nazwy kolumn/pól) -> słownik dokumentu rozumiany przez bibliotekę.
 
 Słownik kanoniczny (wejście dla sprawdz_spojnosc / porownaj / oblicz):
-  id, waluta, tryb, rabat_dokumentu_proc, suma_netto, suma_vat, suma_brutto,
+  id, typ, waluta, tryb, rabat_dokumentu_proc, suma_netto, suma_vat, suma_brutto,
   pozycje[{ilosc, cena_netto_jedn, cena_brutto_jedn, rabat_proc, stawka_vat, netto, vat, brutto}],
   podsumowanie[{stawka_vat, netto, vat, brutto}]
 Pola opcjonalne są pomijane, gdy ich nie znaleziono.
@@ -28,9 +28,12 @@ MAPOWANIE_DOMYSLNE = {
     "suma_brutto": ["suma_brutto", "brutto", "wartosc_brutto"],
     "waluta": ["waluta", "currency"],
     "tryb": ["tryb"],
+    "typ": ["typ", "typ_dokumentu", "rodzaj"],
     "rabat_dokumentu_proc": ["rabat_dokumentu_proc", "rabat_dokumentu"],
     "podsumowanie": ["podsumowanie", "vat_wg_stawek"],
     "pozycja": {
+        "id": ["id", "id_pozycji", "pozycja_id"],
+        "parent_id": ["parent_id", "id_nadrzednej", "nadrzedna_id"],
         "ilosc": ["ilosc", "qty", "liczba_sztuk"],
         "cena_netto_jedn": ["cena_netto_jedn", "cena_netto"],
         "cena_brutto_jedn": ["cena_brutto_jedn", "cena_brutto"],
@@ -47,7 +50,7 @@ MAPOWANIE_DOMYSLNE = {
         "brutto": ["brutto", "wartosc_brutto"],
     },
 }
-_POLA_DOKUMENTU = ("id", "pozycje", "suma_netto", "suma_vat", "suma_brutto", "waluta", "tryb",
+_POLA_DOKUMENTU = ("id", "pozycje", "suma_netto", "suma_vat", "suma_brutto", "waluta", "tryb", "typ",
                    "rabat_dokumentu_proc", "podsumowanie")
 _PODSLOWNIKI = ("pozycja", "podsumowanie_wiersz")
 _BRAK = object()
@@ -118,6 +121,14 @@ def id_dokumentu(wiersz, mapowanie=None):
     return None if w is _BRAK else w
 
 
+def typ_dokumentu(wiersz, mapowanie=None):
+    """Wartość pola 'typ' (wg mapowania) albo None; nigdy nie rzuca z powodu danych."""
+    if not isinstance(wiersz, Mapping):
+        return None
+    w = _pobierz(wiersz, scal_mapowanie(mapowanie)["typ"])
+    return None if w is _BRAK else w
+
+
 def _lista_wierszy(wartosc, pole):
     if not isinstance(wartosc, (list, tuple)) or not all(isinstance(x, Mapping) for x in wartosc):
         raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, pole, "oczekiwano listy słowników")
@@ -134,7 +145,7 @@ def z_wiersza(wiersz, mapowanie=None, pozycje=None, podsumowanie=None):
     if not isinstance(wiersz, Mapping):
         raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, "dokument", "dokument musi być słownikiem (obiektem JSON)")
     m = scal_mapowanie(mapowanie)
-    wynik = {pole: w for pole in ("id", "waluta", "tryb", "rabat_dokumentu_proc")
+    wynik = {pole: w for pole in ("id", "waluta", "tryb", "typ", "rabat_dokumentu_proc")
              if (w := _pobierz(wiersz, m[pole])) is not _BRAK}
     for pole in ("suma_netto", "suma_vat", "suma_brutto"):
         w = _pobierz(wiersz, m[pole])

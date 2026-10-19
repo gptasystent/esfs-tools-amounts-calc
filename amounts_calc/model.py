@@ -1,10 +1,12 @@
 """Model danych: wejście (Pozycja) i wynik (PozycjaWynik, PodsumowanieStawki, DokumentWynik)."""
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Tuple
 
-from .bledy import BRAK_POLA, BladWalidacji
+from .bledy import BRAK_POLA, NIEPOPRAWNA_STRUKTURA, BladWalidacji
 from .config import TRYB_NETTO, TRYBY
+from .hierarchia import liscie_pod, zbuduj_hierarchie
 from .stawki import KOLEJNOSC_STAWEK, do_decimal, normalizuj_stawke
 
 
@@ -21,6 +23,8 @@ class Pozycja:
     stawka_vat: object = 23
     cena_brutto_jedn: object = None
     koszt_zakupu_jedn: object = None
+    id: object = None         # identyfikator pozycji - potrzebny tylko, gdy inne pozycje mają ją za rodzica
+    parent_id: object = None  # id pozycji nadrzędnej (zestawu); patrz hierarchia.py
 
 
 def pozycja_z_slownika(d):
@@ -32,7 +36,7 @@ def pozycja_z_slownika(d):
     return Pozycja(
         ilosc=d["ilosc"], cena_netto_jedn=d.get("cena_netto_jedn"), rabat_proc=d.get("rabat_proc", 0),
         stawka_vat=d["stawka_vat"], cena_brutto_jedn=d.get("cena_brutto_jedn"),
-        koszt_zakupu_jedn=d.get("koszt_zakupu_jedn"),
+        koszt_zakupu_jedn=d.get("koszt_zakupu_jedn"), id=d.get("id"), parent_id=d.get("parent_id"),
     )
 
 
@@ -46,6 +50,9 @@ class PozycjaWynik:
     netto: Decimal
     vat: Decimal
     brutto: Decimal
+    id: object = None
+    parent_id: object = None
+    zestaw: bool = False  # wiersz zbiorczy pozycji nadrzędnej: suma dzieci, nie wchodzi do sum dokumentu
 
 
 @dataclass(frozen=True)
@@ -80,8 +87,10 @@ class DokumentWynik:
         """Słownik z kwotami jako str (gotowy pod JSON); odwracalny przez dokument_z_slownika."""
         return {
             "waluta": self.waluta, "tryb": self.tryb, "tryb_vat": self.tryb_vat,
-            "pozycje": [{"stawka_vat": p.stawka_vat, "ilosc": str(p.ilosc), "netto": str(p.netto),
-                         "vat": str(p.vat), "brutto": str(p.brutto)} for p in self.pozycje],
+            "pozycje": [dict({"stawka_vat": p.stawka_vat, "ilosc": str(p.ilosc), "netto": str(p.netto),
+                              "vat": str(p.vat), "brutto": str(p.brutto)},
+                             **{k: v for k, v in (("id", p.id), ("parent_id", p.parent_id)) if v is not None})
+                        for p in self.pozycje],
             "podsumowanie": [{"stawka_vat": s.stawka_vat, "netto": str(s.netto), "vat": str(s.vat),
                               "brutto": str(s.brutto)} for s in self.podsumowanie],
             "suma_netto": str(self.suma_netto), "suma_vat": str(self.suma_vat),
@@ -93,6 +102,8 @@ def podsumuj_stawki(pozycje):
     """Grupuje pozycje (z polami stawka_vat/netto/vat/brutto) po stawce, w stałej kolejności."""
     sumy = {}
     for p in pozycje:
+        if p.zestaw:
+            continue
         n, v, b = sumy.get(p.stawka_vat, (Decimal(0), Decimal(0), Decimal(0)))
         sumy[p.stawka_vat] = (n + p.netto, v + p.vat, b + p.brutto)
     return tuple(PodsumowanieStawki(s, *sumy[s]) for s in KOLEJNOSC_STAWEK if s in sumy)
@@ -109,23 +120,42 @@ def dokument_z_slownika(d):
     """Buduje DokumentWynik z zewnętrznych danych bez przeliczania - do sprawdz_spojnosc/porownaj.
 
     Wymagane: pozycje[{stawka_vat, netto, vat, brutto}], suma_netto, suma_vat, suma_brutto.
-    Opcjonalne: waluta, tryb ('netto'), tryb_vat, podsumowanie[{stawka_vat, netto, vat, brutto}].
+    Opcjonalne: waluta, tryb ('netto'), tryb_vat, podsumowanie[{stawka_vat, netto, vat, brutto}],
+    w pozycjach id i parent_id (zestawy; kwoty pozycji nadrzędnej mogą być pominięte).
     """
     for pole in ("pozycje", "suma_netto", "suma_vat", "suma_brutto"):
         if pole not in d:
             raise BladWalidacji(BRAK_POLA, pole, "brak pola w dokumencie")
-    pozycje = []
-    for i, p in enumerate(d["pozycje"]):
-        for pole in ("stawka_vat", "netto", "vat", "brutto"):
-            if pole not in p:
-                raise BladWalidacji(BRAK_POLA, "pozycje[%d].%s" % (i, pole), "brak pola")
-        pozycje.append(PozycjaWynik(
+    surowe = list(d["pozycje"])
+    for i, p in enumerate(surowe):
+        if not isinstance(p, Mapping):
+            raise BladWalidacji(NIEPOPRAWNA_STRUKTURA, "pozycje[%d]" % i, "pozycja musi być słownikiem")
+    dzieci = zbuduj_hierarchie([(p.get("id"), p.get("parent_id")) for p in surowe])
+    pozycje = [None] * len(surowe)
+
+    def pozycja(i, p, netto, vat, brutto, zestaw):
+        return PozycjaWynik(
             indeks=i, ilosc=do_decimal(p.get("ilosc", 1), "pozycje[%d].ilosc" % i),
             cena_po_rabacie=Decimal(0), rabat_proc=Decimal(0),
             stawka_vat=normalizuj_stawke(p["stawka_vat"], "pozycje[%d].stawka_vat" % i),
-            netto=do_decimal(p["netto"], "pozycje[%d].netto" % i),
-            vat=do_decimal(p["vat"], "pozycje[%d].vat" % i),
-            brutto=do_decimal(p["brutto"], "pozycje[%d].brutto" % i)))
+            netto=netto, vat=vat, brutto=brutto, id=p.get("id"), parent_id=p.get("parent_id"), zestaw=zestaw)
+
+    for i, p in enumerate(surowe):
+        if i in dzieci:
+            continue
+        for pole in ("stawka_vat", "netto", "vat", "brutto"):
+            if pole not in p:
+                raise BladWalidacji(BRAK_POLA, "pozycje[%d].%s" % (i, pole), "brak pola")
+        pozycje[i] = pozycja(i, p, *(do_decimal(p[k], "pozycje[%d].%s" % (i, k)) for k in ("netto", "vat", "brutto")),
+                             False)
+    for i in sorted(dzieci):   # pozycje nadrzędne: brakujące kwoty = suma liści pod nimi
+        p = surowe[i]
+        if "stawka_vat" not in p:
+            raise BladWalidacji(BRAK_POLA, "pozycje[%d].stawka_vat" % i, "brak pola")
+        liscie = [pozycje[j] for j in liscie_pod(i, dzieci)]
+        kwoty = [do_decimal(p[k], "pozycje[%d].%s" % (i, k)) if p.get(k) is not None
+                 else sum((getattr(l, k) for l in liscie), Decimal(0)) for k in ("netto", "vat", "brutto")]
+        pozycje[i] = pozycja(i, p, *kwoty, True)
     pozycje = tuple(pozycje)
     if d.get("podsumowanie") is not None:
         podsumowanie = tuple(
