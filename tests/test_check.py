@@ -335,6 +335,13 @@ class TestCli(unittest.TestCase):
             f.write(b"\xef\xbb\xbf[]")
         self.assertEqual(self.uruchom(sciezka)[0], 0)
 
+    def test_plik_z_crlf_jak_z_windowsa(self):
+        sciezka = self.sciezka("crlf.json")
+        tekst = json.dumps([dok_trzy_033(["0.07", "0.08", "0.08"], "0.23", "1.22")], indent=2)
+        with open(sciezka, "wb") as f:
+            f.write(tekst.replace("\n", "\r\n").encode("utf-8"))
+        self.assertEqual(self.uruchom(sciezka)[0], 0)
+
     def test_pusta_lista(self):
         kod, out, _ = self.uruchom(self.zapisz("p.json", []))
         self.assertEqual(kod, 0)
