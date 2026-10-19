@@ -11,7 +11,8 @@ from .bledy import (NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, PODSUMOWANIE_STAWKI_ROZNE_OD
 from .config import DOMYSLNA, KONTEKST, TRYB_BRUTTO, VAT_PER_STAWKA
 from .hierarchia import zbuduj_hierarchie
 from .model import DokumentWynik, PodsumowanieStawki, dokument_z_dokumentem, dokument_z_slownika
-from .zestawy import (pasuje_do_jednej_sztuki, podsumowanie_stawek, rozwin, sumy_pozycji, wiersze_z_pozycji)
+from .zestawy import (pasuje_do_jednej_sztuki, podsumowanie_stawek, rozwin, sumy_pozycji, tolerancja_vat_stawek,
+                      wiersze_z_pozycji)
 from .stawki import wartosc_stawki
 
 _100 = Decimal(100)
@@ -51,7 +52,9 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
                                             drugi raz. Alternatywy: do sumy wchodzi co najwyżej jedna z grupy
       VAT_STAWKI_ROZNY_OD_SUMY              VAT stawki != VAT policzony z sumy stawki
                                             (tylko dla tryb_vat == per_stawka; domyślnie
-                                            bierze tryb_vat dokumentu, a gdy nieznany - pomija)
+                                            bierze tryb_vat dokumentu, a gdy nieznany - pomija).
+                                            Dla stawek z zestawami o ilości != 1 tolerancja 0,005 x suma
+                                            mnożników (zaokrąglenie dziecka rośnie N-krotnie)
     """
     # model zestawów: dla słownika decyduje `ilosc_zestawu` (albo klucz "ilosc_zestawu"), dla DokumentWynik - jego pole
     dok = dokument if isinstance(dokument, DokumentWynik) else dokument_z_slownika(dokument, ilosc_zestawu)
@@ -76,13 +79,13 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
                                 "suma_netto + suma_vat != suma_brutto"))
 
         # suma pozycji == suma dokumentu (zestaw wnosi N x dzieci, opcje spoza wyboru nie wchodzą do sumy)
-        wiersze = wiersze_z_pozycji(dok.pozycje)
+        wpoz = wiersze_z_pozycji(dok.pozycje)
         dzieci = zbuduj_hierarchie([(p.id, p.parent_id) for p in dok.pozycje])
-        rozw = rozwin(wiersze, dzieci, uwzglednij_ilosc, konf)
+        rozw = rozwin(wpoz, dzieci, uwzglednij_ilosc, konf)
         wlaczone = frozenset(dok.wlaczone_alternatywy)
-        sumy_poz = sumy_pozycji(wiersze, dzieci, rozw, wlaczone)
+        sumy_poz = sumy_pozycji(wpoz, dzieci, rozw, wlaczone)
         z_pozycji = tuple(PodsumowanieStawki(s, v["netto"], v["vat"], v["brutto"])
-                          for s, v in podsumowanie_stawek(wiersze, dzieci, rozw, wlaczone, konf).items())
+                          for s, v in podsumowanie_stawek(wpoz, dzieci, rozw, wlaczone, konf).items())
         for pole in _POLA_KWOT:
             suma = sumy_poz[pole]
             jest = getattr(dok, "suma_" + pole)
@@ -92,8 +95,8 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
 
         # pozycja nadrzędna (zestaw) == N x suma dzieci
         for i in sorted(dzieci):
-            n = wiersze[i]["ilosc"] if uwzglednij_ilosc else 1
-            jedna_sztuka = n != 1 and pasuje_do_jednej_sztuki(wiersze[i], rozw["sumy_dzieci"][i])
+            n = wpoz[i]["ilosc"] if uwzglednij_ilosc else 1
+            jedna_sztuka = n != 1 and pasuje_do_jednej_sztuki(wpoz[i], rozw["sumy_dzieci"][i])
             for pole in _POLA_KWOT:
                 oczek = rozw["oczekiwane"][i][pole]
                 jest = getattr(dok.pozycje[i], pole)
@@ -125,9 +128,10 @@ def sprawdz_spojnosc(dokument, tryb_vat=None, konfiguracja=DOMYSLNA, ilosc_zesta
 
         # VAT stawki vs VAT z sumy (tylko gdy dokument liczono per stawka)
         if tryb_vat == VAT_PER_STAWKA:
+            tolerancje = tolerancja_vat_stawek(wpoz, dzieci, rozw, wlaczone)
             for s in dok.podsumowanie:
                 oczek = _vat_z_sumy(s, dok.tryb, konf)
-                if oczek != s.vat:
+                if abs(oczek - s.vat) > tolerancje.get(s.stawka_vat, Decimal(0)):
                     wyniki.append(_wpis(VAT_STAWKI_ROZNY_OD_SUMY, "stawka:%s" % s.stawka_vat, "vat",
                                         oczek, s.vat, "VAT stawki != VAT policzony z sumy stawki"))
     return wyniki

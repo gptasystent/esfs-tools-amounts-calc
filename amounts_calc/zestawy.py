@@ -209,3 +209,19 @@ def wybierz_alternatywy(wiersze, dzieci, rozw, naglowek, pola=POLA):
                     wynik += (wybor,)
             najlepsza = ocena(wynik)
     return frozenset(wynik), ("zgodne" if najlepsza[0] == 0 else "najblizsze")
+
+
+def tolerancja_vat_stawek(wiersze, dzieci, rozw, wlaczone=frozenset()):
+    """{stawka: tolerancja} dla sprawdzenia "VAT stawki == VAT z sumy stawki" w dokumentach z zestawami.
+
+    VAT zestawu to N x VAT dzieci (dzieci są zaokrąglone na 1 szt.), więc błąd zaokrąglenia dziecka (do 0,005)
+    rośnie N-krotnie: tolerancja stawki = 0,005 x suma mnożników jej liści o mnożniku różnym od 1. Stawki bez
+    takich liści nie mają tolerancji (porównanie dokładne, jak dawniej)."""
+    tol = {}
+    for i in wiersze_najwyzszego_poziomu(wiersze, rozw["rodzic"], wlaczone):
+        liscie = liscie_pod(i, dzieci) if i in dzieci else [i]
+        for l in liscie:
+            m = rozw["mnozniki"][l]
+            if m != 1:
+                tol[wiersze[l]["stawka"]] = tol.get(wiersze[l]["stawka"], Decimal(0)) + abs(m) * Decimal("0.005")
+    return tol
