@@ -5,7 +5,7 @@ Zmiana trybu zaokrąglania lub liczby miejsc = zmiana tutaj (albo własna instan
 `Konfiguracja` przekazana do funkcji).
 """
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, ROUND_HALF_UP, Context, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Context, Decimal
 
 from .bledy import NIEPOPRAWNY_TRYB, BladWalidacji
 
@@ -44,7 +44,11 @@ class Konfiguracja:
             raise BladWalidacji(NIEPOPRAWNY_TRYB, "rozklad_korekty", "dozwolone: %s" % (ROZKLADY,))
 
     def _kwantyzuj(self, x, miejsca):
-        return x.quantize(Decimal(1).scaleb(-miejsca), rounding=self.zaokraglanie, context=KONTEKST)
+        """Symetrycznie względem zera: reguła zaokrąglania działa na MODULE liczby, znak jest dopisywany
+        po zaokrągleniu (-12,345 -> -12,35, tak samo jak 12,345 -> 12,35). Zero nie dostaje znaku."""
+        # copy_abs/copy_negate (w odróżnieniu od abs/-) nie zaokrąglają do precyzji kontekstu
+        q = x.copy_abs().quantize(Decimal(1).scaleb(-miejsca), rounding=self.zaokraglanie, context=KONTEKST)
+        return q.copy_negate() if x < 0 and q != 0 else q
 
     def kwota(self, x):
         return self._kwantyzuj(x, self.miejsca_kwot)
@@ -59,9 +63,9 @@ class Konfiguracja:
     def grosz(self):
         return Decimal(1).scaleb(-self.miejsca_kwot)
 
-    def podloga(self, x):
-        """Zaokrąglenie w dół do grosza (używane tylko przez rozkład 'proporcjonalnie')."""
-        return x.quantize(self.grosz, rounding=ROUND_FLOOR, context=KONTEKST)
+    def obetnij(self, x):
+        """Obcięcie w stronę zera do grosza (używane tylko przez rozkład 'proporcjonalnie')."""
+        return x.quantize(self.grosz, rounding=ROUND_DOWN, context=KONTEKST)
 
 
 DOMYSLNA = Konfiguracja()

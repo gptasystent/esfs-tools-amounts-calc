@@ -9,6 +9,10 @@ PUNKTY ZAOKRĄGLANIA (kolejność, jedyne miejsca w których cokolwiek jest zaok
        od brutto: netto = brutto / (1+stawka/100) -> grosz, vat = brutto - netto (bez dryfu)
      robione per pozycja ALBO per stawka na sumie (Konfiguracja.tryb_vat).
 
+WARTOŚCI UJEMNE: reguła zaokrąglania działa na module liczby, a znak jest dopisywany po zaokrągleniu,
+więc dokument ze wszystkimi znakami odwróconymi daje dokładnie odwrócone wyniki (także korekta
+groszowa: "największa" pozycja to ta o największym module, a rozkład "proporcjonalnie" jest lustrzany).
+
 POZYCJE NADRZĘDNE (ZESTAWY): pozycja z `parent_id` jest dzieckiem pozycji o danym `id`. Pozycja,
 która ma dzieci, to wiersz zbiorczy: jej kwoty to suma dzieci, a sama NIE wchodzi do sum dokumentu
 ani do podsumowania stawek (brak podwójnego liczenia). Jej własne ilość/cena/rabat są ignorowane
@@ -71,21 +75,31 @@ def _dokladna_czesc(kwota, stawka, tryb):
 
 
 def _rozdziel_reszty(dokladne, docelowa, konf):
-    """Metoda największych reszt: podłogi do grosza + po 1 gr dla największych części ułamkowych."""
-    podlogi = [konf.podloga(x) for x in dokladne]
-    brak = int(((docelowa - sum(podlogi, Decimal(0))) / konf.grosz).to_integral_value())
-    kolejnosc = sorted(range(len(dokladne)), key=lambda j: (-(dokladne[j] - podlogi[j]), j))
-    wynik = list(podlogi)
-    for k in range(brak):
-        wynik[kolejnosc[k % len(kolejnosc)]] += konf.grosz
+    """Metoda największych reszt, symetryczna względem zera.
+
+    Każda część jest obcinana w stronę zera do grosza; brakujące (lub nadmiarowe) grosze dostają
+    pozycje o największej (najmniejszej) reszcie ze znakiem, remis: niższy indeks. Dla samych liczb
+    dodatnich to klasyczna metoda największych reszt, a lustrzana grupa ujemna daje lustrzany wynik."""
+    obciete = [konf.obetnij(x) for x in dokladne]
+    reszty = [x - o for x, o in zip(dokladne, obciete)]
+    brak = int(((docelowa - sum(obciete, Decimal(0))) / konf.grosz).to_integral_value())
+    if brak >= 0:
+        kolejnosc = sorted(range(len(dokladne)), key=lambda j: (-reszty[j], j))
+        krok = konf.grosz
+    else:
+        kolejnosc = sorted(range(len(dokladne)), key=lambda j: (reszty[j], j))
+        krok = -konf.grosz
+    wynik = list(obciete)
+    for k in range(abs(brak)):
+        wynik[kolejnosc[k % len(kolejnosc)]] += krok
     return wynik
 
 
-def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf):
+def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf, dopusc_ujemne=False):
     """Waliduje pozycję i zwraca (ilosc, cena, rabat, stawka)."""
     pre = "pozycje[%d]." % i
     ilosc = do_decimal(p.ilosc, pre + "ilosc")
-    if ilosc < 0:
+    if ilosc < 0 and not dopusc_ujemne:
         raise BladWalidacji(ILOSC_UJEMNA, pre + "ilosc", "ilość nie może być ujemna: %s" % ilosc)
     rabat = _rabat(p.rabat_proc, pre + "rabat_proc")
     stawka = normalizuj_stawke(p.stawka_vat, pre + "stawka_vat")
@@ -106,15 +120,18 @@ def _wejscie_pozycji(i, p, tryb, narzut, marza_proc, konf):
             raise BladWalidacji(BRAK_CENY, pre + "cena_brutto_jedn", "tryb od brutto wymaga ceny brutto")
         cena = do_decimal(p.cena_brutto_jedn, pre + "cena_brutto_jedn")
         pole_ceny = pre + "cena_brutto_jedn"
-    if cena < 0:
+    if cena < 0 and not dopusc_ujemne:
         raise BladWalidacji(CENA_UJEMNA, pole_ceny, "cena nie może być ujemna: %s" % cena)
     return ilosc, cena, rabat, stawka
 
 
 def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
            narzut_proc=None, marza_proc=None, tryb_vat=None, rozklad_korekty=None,
-           konfiguracja=DOMYSLNA):
+           dopusc_ujemne=False, konfiguracja=DOMYSLNA):
     """Przelicza dokument. `pozycje`: lista Pozycja lub słowników. Zwraca DokumentWynik.
+
+    `dopusc_ujemne=True` dopuszcza ujemne ilości i ceny (rabat jako osobna linia, korekta, zwrot);
+    domyślnie są błędem walidacji. Zaokrąglanie i rozbicie VAT są symetryczne względem zera.
 
     Waluta jest tylko etykietą (bez przeliczeń kursowych); zaokrąglanie jak dla PLN.
     """
@@ -142,7 +159,7 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
         ilosci, ceny_po, rabaty, stawki, kwoty = [], [], [], [], []
         for i in liscie:
             p = wejscia[i]
-            ilosc, cena, rabat, stawka = _wejscie_pozycji(i, p, tryb, narzut_proc, marza_proc, konf)
+            ilosc, cena, rabat, stawka = _wejscie_pozycji(i, p, tryb, narzut_proc, marza_proc, konf, dopusc_ujemne)
             cena_po = konf.cena(cena * (1 - rabat / _100))                 # punkt 1
             wartosc = konf.kwota(ilosc * cena_po)                           # punkt 2
             if rabat_dok > 0:
@@ -169,7 +186,7 @@ def oblicz(pozycje, tryb=TRYB_NETTO, waluta="PLN", rabat_dokumentu_proc=0,
                 continue
             if rozklad == ROZKLAD_NAJWIEKSZA:
                 # największa wartość w stawce, remis -> najniższy indeks (deterministycznie)
-                najw = max(idx, key=lambda i: (kwoty[i], -i))
+                najw = max(idx, key=lambda i: (abs(kwoty[i]), -i))
                 nowe = {najw: vat[najw] + roznica if tryb == TRYB_NETTO else netto[najw] - roznica}
             else:
                 docelowa = _rozbij(sum(kwoty[i] for i in idx), s, tryb, konf)[1 if tryb == TRYB_NETTO else 0]
