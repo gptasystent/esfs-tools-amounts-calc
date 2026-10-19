@@ -225,3 +225,14 @@ def tolerancja_vat_stawek(wiersze, dzieci, rozw, wlaczone=frozenset()):
             if m != 1:
                 tol[wiersze[l]["stawka"]] = tol.get(wiersze[l]["stawka"], Decimal(0)) + abs(m) * Decimal("0.005")
     return tol
+
+
+def waga_liscia(l, wiersze, rozw, wlaczone=frozenset()):
+    """Ile razy liść wchodzi do sum dokumentu: iloczyn ilości zestawów nad nim, 0 dla opcji spoza wyboru."""
+    rodzic = rozw["rodzic"]
+    gora = l
+    while gora in rodzic:
+        gora = rodzic[gora]
+    if wiersze[gora].get("alternatywa") is not None and gora not in wlaczone:
+        return Decimal(0)
+    return rozw["mnozniki"][l]

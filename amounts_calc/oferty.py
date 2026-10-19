@@ -6,12 +6,13 @@ wyniku oblicz(). Nie rzucają z powodu danych: pozycję, której nie da się oce
 from decimal import Decimal, DecimalException, localcontext
 
 from . import marza
-from .bledy import ZESTAW_Z_NARZUTEM, BladWalidacji
+from .bledy import ALTERNATYWY_W_SUMIE, ZESTAW_Z_NARZUTEM, BladWalidacji
 from .config import DOMYSLNA, KONTEKST
 from .hierarchia import liscie_pod
 from .klasyfikacja import PROG
 from .obliczenia import oblicz
 from .stawki import do_decimal
+from .zestawy import grupy_alternatyw, rozwin, sumy_pozycji, wiersze_z_pozycji, wklad, wybierz_alternatywy
 
 _100 = 100
 
@@ -117,13 +118,14 @@ def czynnik_zestawu(p):
 
 
 def zestawy_z_narzutem(pozycje, zapisany, dzieci, konf=DOMYSLNA):
-    """Zestawy, których zapisane kwoty różnią się od sumy liści pod nimi dokładnie o własny narzut/rabat.
+    """Zestawy, których zapisane kwoty różnią się od N x sumy dzieci dokładnie o własny narzut/rabat.
 
     pozycje: kanoniczne pozycje; zapisany: DokumentWynik z zapisanymi kwotami (zestawy mają kwoty);
     dzieci: wynik zbuduj_hierarchie. Zwraca listę {indeks, id, narzut_proc, marza_proc, rabat_proc, czynnik,
     suma_dzieci, zapisane, oczekiwane, roznica} (kwoty netto) tylko dla zestawów z różnicą, którą narzut/rabat
     tłumaczy: netto w granicach 0,01, a VAT i brutto w granicach 0,01 na każdy liść (zaokrąglenia dzieci)."""
     wynik = []
+    oczekiwane = rozwin(wiersze_z_pozycji(zapisany.pozycje), dzieci, zapisany.ilosc_zestawu, konf)["oczekiwane"]
     for i in sorted(dzieci):
         p = pozycje[i]
         czynnik = czynnik_zestawu(p)
@@ -131,7 +133,7 @@ def zestawy_z_narzutem(pozycje, zapisany, dzieci, konf=DOMYSLNA):
             continue
         liscie = [zapisany.pozycje[j] for j in liscie_pod(i, dzieci)]
         wiersz = zapisany.pozycje[i]
-        suma = {k: sum((getattr(l, k) for l in liscie), Decimal(0)) for k in POLA_KWOT}
+        suma = oczekiwane[i]       # N x suma dzieci (dla N = 1 zwykła suma dzieci)
         zapis = {k: getattr(wiersz, k) for k in POLA_KWOT}
         if all(zapis[k] == suma[k] for k in POLA_KWOT):
             continue          # brak różnicy do wytłumaczenia
@@ -162,3 +164,29 @@ def przyczyna_zestaw_z_narzutem(zestawy, naglowek_uwzglednia):
             "opis": "kwoty pozycji nadrzędnej różnią się od sumy dzieci zgodnie z jej własnym narzutem/rabatem",
             "naglowek_uwzglednia_zestawy": naglowek_uwzglednia,
             "zestawy": [{k: v for k, v in z.items() if not k.startswith("_")} for z in zestawy]}
+
+
+# ---- alternatywy (opcje wzajemnie wykluczające się) ----
+
+def przyczyna_alternatyw(wiersze, dzieci, naglowek, wlaczone, uwzglednij_ilosc=True, konf=DOMYSLNA):
+    """Informacja ALTERNATYWY_W_SUMIE: lista opcji (pozycje najwyższego poziomu z `alternatywa`) per grupa,
+    które z nich weszły do sum i czy nagłówek jest z tym zgodny.
+
+    naglowek: {pole: Decimal|None}. `dopasowanie`: "zgodne" - baza + wybrane opcje = nagłówek; "najblizsze" -
+    żadna kombinacja (po jednej lub żadnej opcji z grupy) nie pasuje. `naglowek_zawiera_wszystkie_opcje`: nagłówek
+    = baza + WSZYSTKIE opcje, czyli alternatywy zostały po cichu dodane do sumy mimo, że wykluczają się."""
+    rozw = rozwin(wiersze, dzieci, uwzglednij_ilosc, konf)
+    grupy = grupy_alternatyw(wiersze, rozw["rodzic"])
+    if not grupy:
+        return None
+    _, dopasowanie = wybierz_alternatywy(wiersze, dzieci, rozw, naglowek)
+    wszystkie = sumy_pozycji(wiersze, dzieci, rozw, frozenset(i for idx in grupy.values() for i in idx))
+    pola = [f for f in POLA_KWOT if naglowek.get(f) is not None and wszystkie[f] is not None]
+    zawiera_wszystkie = (dopasowanie != "zgodne" and any(len(idx) > 1 for idx in grupy.values()) and bool(pola)
+                         and all(abs(naglowek[f] - wszystkie[f]) <= PROG for f in pola))
+    return {"kod": ALTERNATYWY_W_SUMIE, "pole": None, "roznica": None, "informacja": True, "raportuj": True,
+            "opis": "pozycje typu opcja wykluczają się wzajemnie: do sumy wchodzi co najwyżej jedna z grupy",
+            "dopasowanie": dopasowanie, "naglowek_zawiera_wszystkie_opcje": zawiera_wszystkie,
+            "grupy": [{"grupa": g, "pozycje": [dict({"indeks": i, "id": wiersze[i].get("id"), "wliczona": i in wlaczone,
+                                                      "zestaw": i in dzieci}, **wklad(i, wiersze, dzieci, rozw))
+                                                for i in idx]} for g, idx in grupy.items()]}
