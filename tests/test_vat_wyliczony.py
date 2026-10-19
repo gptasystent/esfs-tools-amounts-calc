@@ -203,6 +203,31 @@ class TestVatWyliczonyWRaporcie(unittest.TestCase):
         self.assertEqual(p["kody"][bledy.VAT_WYLICZONY_ROZNY], 1)
         self.assertEqual(p["kody"][bledy.BRAK_VAT_W_POZYCJACH], 1)
 
+    def test_podsumowanie_co_jest_do_zrobienia_liczy_zgodne_osobno(self):
+        from amounts_calc.check import linie_do_zrobienia, tekst_podsumowania
+        wyniki, p = sprawdz_partie(self.DOKUMENTY)
+        self.assertEqual((p["vat_wyliczony_zgodny"], p["vat_wyliczony_rozny"], p["spojne_z_wyliczonym_vat"]), (2, 1, 2))
+        linie = linie_do_zrobienia(p)
+        self.assertEqual(len(linie), 5)
+        self.assertEqual(linie, [
+            "Do sprawdzenia: 1 (niespójne: 1, błędne: 0)",
+            "Tylko drobiazgi (POLGROSZ): 0",
+            "Niepełne dane (brak VAT w pozycjach): 1",
+            "Pominięte typy: brak (patrz --pomin-typy)",
+            "Bez uwag: 2 z 4 dokumentów (w tym VAT wyliczony z pozycji i zgodny z nagłówkiem: 2)",
+        ])
+        self.assertEqual(tekst_podsumowania(p, wyniki).splitlines()[:5], linie)
+
+    def test_bez_zgodnych_linia_bez_dopisku(self):
+        from amounts_calc.check import linie_do_zrobienia
+        _, p = sprawdz_partie(self.DOKUMENTY[2:])
+        self.assertEqual(linie_do_zrobienia(p)[4], "Bez uwag: 0 z 2 dokumentów")
+
+    def test_zgodny_ale_niespojny_z_innego_powodu_nie_liczy_sie_do_bez_uwag(self):
+        d = dict(dok("127.00", "25.16", "152.99", DWIE_STAWKI), id="x")
+        _, p = sprawdz_partie([d])
+        self.assertEqual((p["vat_wyliczony_zgodny"], p["spojne_z_wyliczonym_vat"]), (1, 0))
+
     def test_tekst_json_csv_zawieraja_nowe_kody(self):
         kod, out, raport, wiersze = self.uruchom()
         self.assertEqual(kod, 1)

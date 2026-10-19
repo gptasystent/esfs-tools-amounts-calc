@@ -25,7 +25,7 @@ from decimal import Decimal, DecimalException
 
 from .adapter import id_dokumentu, scal_mapowanie, typ_dokumentu, wczytaj_plik_json, z_wiersza
 from .bledy import (BRAK_CENY, BRAK_POLA, BRAK_VAT_W_POZYCJACH, ILOSC_X_CENA, NAGLOWEK_NIZSZY, NAGLOWEK_WYZSZY, NAGLOWEK_ZERO,
-                    NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ,
+                    NETTO_PLUS_VAT_ROZNE_OD_BRUTTO, NIEPOPRAWNA_LICZBA, NIEZGODNY_Z_BIBLIOTEKA, POLGROSZ, VAT_WYLICZONY_ZGODNY,
                     SUMA_POZYCJI_ROZNA_OD_DOKUMENTU, VAT_WYLICZONY_ROZNY, ZESTAW_LICZONY_PODWOJNIE, BladWalidacji)
 from .config import TRYBY_VAT, VAT_PER_POZYCJA, VAT_PER_STAWKA
 from .formatowanie import format_bez_zer, format_kwoty
@@ -319,6 +319,10 @@ def ma_problem(wynik):
     return wynik["status"] not in ("spojny", "pominiety")
 
 
+def _ma_kod(wynik, kod):
+    return any(c["kod"] == kod for c in wynik["przyczyny"])
+
+
 def _wg_typu(wyniki):
     tabela = {}
     for w in wyniki:
@@ -351,6 +355,10 @@ def sprawdz_partie(dokumenty, tryb_vat=VAT_PER_STAWKA, mapowanie=None, pomin_typ
         "z_niespojnosciami": sum(1 for w in wyniki if w["niespojnosci"]),
         "z_bledem": sum(1 for w in wyniki if w["blad"]),
         "z_problemem": sum(1 for w in wyniki if ma_problem(w)),
+        "vat_wyliczony_zgodny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ZGODNY)),
+        "vat_wyliczony_rozny": sum(1 for w in wyniki if _ma_kod(w, VAT_WYLICZONY_ROZNY)),
+        "spojne_z_wyliczonym_vat": sum(1 for w in wyniki
+                                       if w["status"] == "spojny" and _ma_kod(w, VAT_WYLICZONY_ZGODNY)),
         "wymaga_uwagi": sum(1 for w in wyniki if w["status"] in ("niespojny", "blad")),
         "kody": dict(sorted(kody.items(), key=lambda kv: (-kv[1], kv[0]))),
         "porownanych": len(porownane),
@@ -380,6 +388,8 @@ def _tabela_typow(wg_typu):
 def linie_do_zrobienia(p):
     """Dokładnie 5 linii na początek raportu: co wymaga decyzji, a co można zignorować."""
     s = p["status"]
+    zgodne = (" (w tym VAT wyliczony z pozycji i zgodny z nagłówkiem: %d)" % p["spojne_z_wyliczonym_vat"]
+              if p["spojne_z_wyliczonym_vat"] else "")
     pominiete = ("Pominięte typy (%s): %d" % (", ".join(p["pominiete_typy"]), p["pominiete"])
                  if p["pominiete_typy"] else "Pominięte typy: brak (patrz --pomin-typy)")
     return [
@@ -387,7 +397,7 @@ def linie_do_zrobienia(p):
         "Tylko drobiazgi (POLGROSZ): %d" % s["drobiazg"],
         "Niepełne dane (brak VAT w pozycjach): %d" % s["niepelny"],
         pominiete,
-        "Bez uwag: %d z %d dokumentów" % (s["spojny"], p["liczba_dokumentow"]),
+        "Bez uwag: %d z %d dokumentów%s" % (s["spojny"], p["liczba_dokumentow"], zgodne),
     ]
 
 
